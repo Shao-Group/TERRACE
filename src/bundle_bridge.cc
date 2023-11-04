@@ -148,7 +148,7 @@ int bundle_bridge::build(map <string, int> RO_reads_map, faidx_t *_fai)
 	extract_circ_fragment_pairs();
 	//print_circ_fragment_pairs();
 	join_circ_fragment_pairs(bdg.length_high);
-	//print_circRNAs();
+	print_circRNAs();
 
 	//printf("fragments vector size after = %zu\n",fragments.size());
 
@@ -414,7 +414,7 @@ int bundle_bridge::get_more_chimeric()
 			{
 				if(left_len >= min_soft_clip_len)
 				{
-					printf("both side soft clips same length in new chimeric, chrm=%s, fr.qname=%s, fr.h1.pos=%d\n",bb.chrm.c_str(),fr.h1->qname.c_str(),fr.h1->pos);
+					//printf("both side soft clips same length in new chimeric, chrm=%s, fr.qname=%s, fr.h1.pos=%d\n",bb.chrm.c_str(),fr.h1->qname.c_str(),fr.h1->pos);
 				}
 				continue;
 			}
@@ -3836,7 +3836,7 @@ int bundle_bridge::join_circ_fragment_pair(pair<fragment,fragment> &fr_pair, int
 		circular_transcript circ;
 		circ.circRNA_id = circRNA_id;
 		circ.seqname = chrm_id;
-		circ.source = "scallop2";
+		circ.source = "TERRACE";
 		circ.path_score = fr2.paths[0].score;
 		circ.path_type = fr2.paths[0].type;
 		if(circ.path_type == 1) circ.path_count_1++;
@@ -3862,7 +3862,7 @@ int bundle_bridge::join_circ_fragment_pair(pair<fragment,fragment> &fr_pair, int
 		{
 			circ.fake_supple = true;
 			circ.fake_count = 1;
-			circ.source = "scallop2_MC";
+			circ.source = "TERRACE_NEW";
 		}
 
 		circ.feature = "circRNA";
@@ -3975,7 +3975,7 @@ int bundle_bridge::join_circ_fragment_pair(pair<fragment,fragment> &fr_pair, int
 		circular_transcript circ;
 		circ.circRNA_id = circRNA_id;
 		circ.seqname = chrm_id;
-		circ.source = "scallop2";
+		circ.source = "TERRACE";
 		circ.path_score = fr2.paths[0].score;
 		circ.path_type = fr2.paths[0].type;
 		if(circ.path_type == 1) circ.path_count_1++;
@@ -4001,7 +4001,7 @@ int bundle_bridge::join_circ_fragment_pair(pair<fragment,fragment> &fr_pair, int
 		{
 			circ.fake_supple = true;
 			circ.fake_count = 1;
-			circ.source = "scallop2_MC";
+			circ.source = "TERRACE_NEW";
 		}
 
 		circ.feature = "circRNA";

@@ -173,7 +173,7 @@ int bridger::bridge_clip(int32_t p1, int32_t p2, circular_transcript &circ)
 	}
 
 
-	printf("Printing x1 and x2: x1 = %d, x2 = %d\n",x1,x2);
+	//printf("Printing x1 and x2: x1 = %d, x2 = %d\n",x1,x2);
 	
 	
 	if(x1 != -1 && x2 != -1 && x1 > x2) return -1;
@@ -1781,7 +1781,7 @@ int bridger::pick_bridge_path(vector<fragment> &frags)
 			continue;
 		}
 
-		for(int i=0;i<fr.paths.size();i++)
+		/*for(int i=0;i<fr.paths.size();i++)
 		{
 			int32_t len = fr.paths[i].length;
 			
@@ -1856,7 +1856,7 @@ int bridger::pick_bridge_path(vector<fragment> &frags)
 				}
 				printf("\n");
 			}
-		}
+		}*/
 
 		//set regions, merged regions and junctions for paths
 		for(int i=0;i<fr.paths.size();i++)
@@ -1916,7 +1916,7 @@ int bridger::pick_bridge_path(vector<fragment> &frags)
 		}
 
 		//print path information of fragments
-		printf("\nPrinting path info:\n");
+		/*printf("\nPrinting path info:\n");
 		printf("chrm = %s\n",bd->bb.chrm.c_str());
 		printf("fragment read = %s, h1 pos = %d, h2 pos = %d\n",fr.h1->qname.c_str(),fr.h1->pos,fr.h2->pos);
 		if((fr.h1->flag & 0x800) >= 1) printf("fr.h1 is supplementary\n");
@@ -1959,7 +1959,7 @@ int bridger::pick_bridge_path(vector<fragment> &frags)
 				}
 			}
 		}
-		printf("\n");
+		printf("\n");*/
 
 		vector<path> primary_selected_paths;
 		vector<path> remove_list;
@@ -2039,7 +2039,7 @@ int bridger::pick_bridge_path(vector<fragment> &frags)
 			}
 		}
 
-		if(remove_map.size() > 0)
+		/*if(remove_map.size() > 0)
 		{
 			printf("initial remove map:\n");
 			map<string,int>::iterator itn;
@@ -2048,7 +2048,7 @@ int bridger::pick_bridge_path(vector<fragment> &frags)
 				printf("%s,",itn->first.c_str());
 			}
 			printf("\n");
-		}
+		}*/
 
 		//vector<path> selected_paths;
 		//selected_paths.clear();
@@ -2113,7 +2113,7 @@ int bridger::pick_bridge_path(vector<fragment> &frags)
 			}
 		}
 
-		if(remove_map.size() > 0)
+		/*if(remove_map.size() > 0)
 		{
 			printf("final remove map:\n");
 			map<string,int>::iterator itn;
@@ -2122,7 +2122,7 @@ int bridger::pick_bridge_path(vector<fragment> &frags)
 				printf("%s,",itn->first.c_str());
 			}
 			printf("\n");
-		}
+		}*/
 
 		for(int i=0;i<primary_selected_paths.size();i++)
 		{
@@ -2143,7 +2143,7 @@ int bridger::pick_bridge_path(vector<fragment> &frags)
 		//check if selected paths is zero
 		if(selected_paths.size() == 0)
 		{
-			printf("selected path size zero\n");
+			//printf("selected path size zero\n");
 			//selected_paths = fr.paths;
 			fr.set_bridged(false);
 			fr.paths.resize(0);
@@ -2221,7 +2221,7 @@ int bridger::pick_bridge_path(vector<fragment> &frags)
 		}
 
 		//printing selected read/ref paths
-		map<string, pair<path, int>>::iterator itn;
+		/*map<string, pair<path, int>>::iterator itn;
 		for(itn = ref_paths_map.begin(); itn != ref_paths_map.end(); itn++)
 		{
 			printf("ref_path_key = %s, count = %d\n",itn->first.c_str(),itn->second.second);
@@ -2229,7 +2229,7 @@ int bridger::pick_bridge_path(vector<fragment> &frags)
 		for(itn = read_paths_map.begin(); itn != read_paths_map.end(); itn++)
 		{
 			printf("read_path_key = %s, count = %d\n",itn->first.c_str(),itn->second.second);
-		}
+		}*/
 
 		vector<path> intersection;
 		map<string, pair<path, int>>::iterator itn1;
@@ -2299,9 +2299,10 @@ int bridger::pick_bridge_path(vector<fragment> &frags)
 			best_path = ref_paths_map.begin()->second.first;
 		}*/
 
-		printf("best path:\n");
-		printv(best_path.v);
-		printf("\n");
+		// printf("best path:\n");
+		// printv(best_path.v);
+		// printf("\n");
+
 		fr.paths[0] = best_path;
 		fr.paths.resize(1);
 		assert(fr.paths.size() == 1);

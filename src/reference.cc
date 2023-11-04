@@ -22,9 +22,9 @@ int reference::build_interval_set_map()
 		if(c == '-') add_interval_set(isms2, k);
 	}
 
-	printf("isms0 size: %lu\n",isms0.size());
-	printf("isms1 size: %lu\n",isms1.size());
-	printf("isms2 size: %lu\n",isms2.size());
+	// printf("isms0 size: %lu\n",isms0.size());
+	// printf("isms1 size: %lu\n",isms1.size());
+	// printf("isms2 size: %lu\n",isms2.size());
 	return 0;
 }
 

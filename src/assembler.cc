@@ -172,10 +172,10 @@ int assembler::assemble()
 	//printf("size of assembler circ vector HS = %lu\n", circular_trsts_HS.size());
 	//write_circular_boundaries();
 
-	printf("size of circular vector = %lu\n",circular_trsts.size());
-	printf("size of HS_both_side_reads = %lu\n",HS_both_side_reads.size());
-	printf("size of chimeric_reads = %lu\n",chimeric_reads.size());
-	printf("#RO_count hits = %d\n",RO_count);
+	// printf("size of circular vector = %lu\n",circular_trsts.size());
+	// printf("size of HS_both_side_reads = %lu\n",HS_both_side_reads.size());
+	// printf("size of chimeric_reads = %lu\n",chimeric_reads.size());
+	// printf("#RO_count hits = %d\n",RO_count);
 	//write_RO_info();
 
 	remove_long_exon_circ_trsts();
@@ -395,7 +395,7 @@ int assembler::remove_duplicate_circ_trsts()
 		circular_transcript &circ = itn->second.first;
 		string hash = itn->first;
 
-		if(circ.source != "scallop2") continue;
+		if(circ.source != "TERRACE") continue;
 
 		vector<string> split_coordinates = split_str(hash,"|");
 
@@ -453,7 +453,7 @@ int assembler::remove_duplicate_circ_trsts()
 		circular_transcript &circ = itn->second.first;
 		string hash = itn->first;
 
-		if(circ.source != "scallop2_MC") continue;
+		if(circ.source != "TERRACE_NEW") continue;
 
 		vector<string> split_coordinates = split_str(hash,"|");
 
@@ -697,7 +697,7 @@ int assembler::write_circular_boundaries()
 int assembler::write_circular()
 {
 	//printf("file - %s", output_circ_file.c_str());
-	ofstream fcirc(output_circ_file.c_str(), fstream::trunc);
+	ofstream fcirc(output_file.c_str(), fstream::trunc);
 	
 	if(fcirc.fail())
 	{

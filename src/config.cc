@@ -39,13 +39,13 @@ int min_soft_clip_len = 15; // for new chimeric reads soft_len needs to be great
 double min_jaccard = 0.9; //new chimeric similarity threshold
 
 // for bam file and reads
-int min_flank_length = 3;
+int min_flank_length = 0; //3
 int max_num_cigar = 1000;
 int max_edit_distance = 10;
 int32_t min_bundle_gap = 100;		
-int min_num_hits_in_bundle = 5;	
+int min_num_hits_in_bundle = 0; //5	
 int min_num_splices_in_bundle = 15;	// not used; accept bundle if #hits with splices is at least this number
-uint32_t min_mapping_quality = 1;
+uint32_t min_mapping_quality = 0; //1
 int32_t min_splice_boundary_hits = 1;
 bool use_second_alignment = false; //change if needed
 bool uniquely_mapped_only = false;
@@ -84,17 +84,17 @@ double min_subregion_ave = 1.5;
 double min_guaranteed_edge_weight = 0.01;
 
 // for selecting paths
-double min_transcript_coverage = 1.5;
-double min_single_exon_coverage = 20;
+double min_transcript_coverage = 0; //1.5
+double min_single_exon_coverage = 0; //20
 double min_transcript_numreads = 10;
-int min_transcript_length_base = 150;
-int min_transcript_length_increase = 50;
+int min_transcript_length_base = 0; //150
+int min_transcript_length_increase = 0; //50
 int min_exon_length = 20;
 int max_num_exons = 1000;
 
 // input and output
 //sinitializing as empty string for verifying absence
-string algo = "scallop2";
+string algo = "TERRACE";
 string input_file = "";
 string fasta_file = "";
 string ref_file = "";
@@ -108,8 +108,8 @@ string feature_file = "";
 
 // for controling
 int batch_bundle_size = 100;
-int verbose = 1;
-string version = "v1.1.2";
+int verbose = 0;//1
+string version = "v1.1.1";
 
 
 //for extracting BSJ
@@ -510,32 +510,32 @@ int print_command_line(int argc, const char ** argv)
 int print_help()
 {
 	printf("\n");
-	printf("Usage: scallop2 -i <bam-file> -o <gtf-file> [options]\n");
+	printf("Usage: terrace -i <bam-file.bam> -o <gtf-file.gtf> -fa <reference-genome.fa> --read_length <length-of-paired-end-reads> -r [reference_annotation.gtf] -fe [feature_file] [options]\n");
 	printf("\n");
 	printf("Options:\n");
-	printf(" %-42s  %s\n", "--help",  "print usage of Scallop and exit");
-	printf(" %-42s  %s\n", "--version",  "print current version of Scallop and exit");
-	printf(" %-42s  %s\n", "--preview",  "determine fragment-length-range and library-type and exit");
-	printf(" %-42s  %s\n", "--verbose <0, 1, 2>",  "0: quiet; 1: one line for each graph; 2: with details, default: 1");
-	printf(" %-42s  %s\n", "-f/--transcript_fragments <filename>",  "file to which the assembled non-full-length transcripts will be written to");
+	printf(" %-42s  %s\n", "--help",  "print usage of TERRACE and exit");
+	//printf(" %-42s  %s\n", "--version",  "print current version of TERRACE and exit");
+	//printf(" %-42s  %s\n", "--preview",  "determine fragment-length-range and library-type and exit");
+	//printf(" %-42s  %s\n", "--verbose <0, 1, 2>",  "0: quiet; 1: one line for each graph; 2: with details, default: 1");
+	//printf(" %-42s  %s\n", "-f/--transcript_fragments <filename>",  "file to which the assembled non-full-length transcripts will be written to");
 	printf(" %-42s  %s\n", "--library_type <first, second, unstranded>",  "library type of the sample, default: unstranded");
-	printf(" %-42s  %s\n", "--min_transcript_coverage <float>",  "minimum coverage required for a multi-exon transcript, default: 1.5");
-	printf(" %-42s  %s\n", "--min_single_exon_coverage <float>",  "minimum coverage required for a single-exon transcript, default: 20");
-	printf(" %-42s  %s\n", "--min_transcript_length_increase <integer>",  "default: 50");
-	printf(" %-42s  %s\n", "--min_transcript_length_base <integer>",  "default: 150, minimum length of a transcript would be");
-	printf(" %-42s  %s\n", "",  "--min_transcript_length_base + --min_transcript_length_increase * num-of-exons");
-	printf(" %-42s  %s\n", "--min_mapping_quality <integer>",  "ignore reads with mapping quality less than this value, default: 1");
+	//printf(" %-42s  %s\n", "--min_transcript_coverage <float>",  "minimum coverage required for a multi-exon transcript, default: 1.5");
+	//printf(" %-42s  %s\n", "--min_single_exon_coverage <float>",  "minimum coverage required for a single-exon transcript, default: 20");
+	//printf(" %-42s  %s\n", "--min_transcript_length_increase <integer>",  "default: 50");
+	//printf(" %-42s  %s\n", "--min_transcript_length_base <integer>",  "default: 150, minimum length of a transcript would be");
+	//printf(" %-42s  %s\n", "",  "--min_transcript_length_base + --min_transcript_length_increase * num-of-exons");
+	//printf(" %-42s  %s\n", "--min_mapping_quality <integer>",  "ignore reads with mapping quality less than this value, default: 1");
 	printf(" %-42s  %s\n", "--max_num_cigar <integer>",  "ignore reads with CIGAR size larger than this value, default: 1000");
 	printf(" %-42s  %s\n", "--min_bundle_gap <integer>",  "minimum distances required to start a new bundle, default: 100");
-	printf(" %-42s  %s\n", "--min_num_hits_in_bundle <integer>",  "minimum number of reads required in a gene locus, default: 5");
-	printf(" %-42s  %s\n", "--min_flank_length <integer>",  "minimum match length in each side for a spliced read, default: 3");
+	//printf(" %-42s  %s\n", "--min_num_hits_in_bundle <integer>",  "minimum number of reads required in a gene locus, default: 5");
+	//printf(" %-42s  %s\n", "--min_flank_length <integer>",  "minimum match length in each side for a spliced read, default: 3");
 
 	return 0;
 }
 
 int print_copyright()
 {
-	printf("Scallop2 %s (c) 2021 Qimin Zhang, Qian Shi, and Mingfu Shao, The Pennsylvania State University\n", version.c_str());
+	printf("TERRACE %s (c) 2023 Tasfia Zahin, Qian Shi, Xiaofei Carl Zang, and Mingfu Shao, The Pennsylvania State University\n", version.c_str());
 	return 0;
 }
 
