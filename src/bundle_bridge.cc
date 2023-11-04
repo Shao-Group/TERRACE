@@ -148,7 +148,7 @@ int bundle_bridge::build(map <string, int> RO_reads_map, faidx_t *_fai)
 	extract_circ_fragment_pairs();
 	//print_circ_fragment_pairs();
 	join_circ_fragment_pairs(bdg.length_high);
-	print_circRNAs();
+	//print_circRNAs();
 
 	//printf("fragments vector size after = %zu\n",fragments.size());
 
@@ -455,7 +455,7 @@ int bundle_bridge::get_more_chimeric()
 				if(left_soft[hash].first != -1 && left_soft[hash].second != -1)
 				{
 					//present in map and junc exitsts, create supple
-					printf("soft left clip:exists, fake created\n");
+					//printf("soft left clip:exists, fake created\n");
 					create_fake_supple(k,fr,soft_len,left_soft[hash].first,left_soft[hash].second,soft_clip_side);
 				}
 				exists = true;
@@ -490,7 +490,7 @@ int bundle_bridge::get_more_chimeric()
 				if(right_soft[hash].first != -1 && right_soft[hash].second != -1)
 				{	
 					//present in map and junc exists, create supple
-					printf("soft right clip:exists, fake created\n");
+					//printf("soft right clip:exists, fake created\n");
 					create_fake_supple(k,fr,soft_len,right_soft[hash].first,right_soft[hash].second,soft_clip_side);
 				}
 				exists = true;
@@ -687,7 +687,7 @@ int bundle_bridge::get_more_chimeric()
 			}
 
 			string s = fr.h1->soft_left_clip_seqs[0] + tiny;
-			printf("name=%s,tiny:%s\n clip:%s, s=%s \n seq=%s\n",fr.h1->qname.c_str(),tiny.c_str(),fr.h1->soft_left_clip_seqs[0].c_str(),s.c_str(),fr.h1->seq.c_str());
+			//printf("name=%s,tiny:%s\n clip:%s, s=%s \n seq=%s\n",fr.h1->qname.c_str(),tiny.c_str(),fr.h1->soft_left_clip_seqs[0].c_str(),s.c_str(),fr.h1->seq.c_str());
 
 			//create a hash map for the kmers in soft clip region and pass that for similarity testing
 			/*int kmer_length = 10;
@@ -748,17 +748,16 @@ int bundle_bridge::get_more_chimeric()
 				}*/
 				
 				if(similarity > min_jaccard)
-				//if(edit <= floor(soft_len/10))
 				{
 					edit_match = 1;
-					printf("editmatch case 1: region seq pos1=%d, pos2=%d, region_seqlen = %lu\n",pos1,pos2,region_seq.size());
+					//printf("editmatch case 1: region seq pos1=%d, pos2=%d, region_seqlen = %lu\n",pos1,pos2,region_seq.size());
 				}
 				
 				if(edit_match == 1)
 				{
 					if(prev_pos2 != 0 && pos2 != prev_pos2)
 					{
-						printf("pos2 = %d, prev_pos2 = %d\n",pos2,prev_pos2);
+						//printf("pos2 = %d, prev_pos2 = %d\n",pos2,prev_pos2);
 						rc_multiple = 1;
 						break;
 					}
@@ -769,7 +768,7 @@ int bundle_bridge::get_more_chimeric()
 
 			if(rc_multiple == 1) 
 			{
-				printf("rc_multiple = %d, frag_name=%s\n",rc_multiple,fr.h1->qname.c_str());
+				//printf("rc_multiple = %d, frag_name=%s\n",rc_multiple,fr.h1->qname.c_str());
 				left_soft[hash] = pair<int32_t,int32_t> (-1,-1);
 				continue;
 			}
@@ -788,7 +787,7 @@ int bundle_bridge::get_more_chimeric()
 				string new_s = s.substr(s.size()-effective_len,effective_len);
 				if(effective_len < min_soft_clip_len)
 				{
-					printf("effective_len < min_soft_clip_len:chr=%s,read=%s,read_pos=%d,fullsoftseq=%s,truncated_s=%s,softlen=%d,effective_len=%d\n",bb.chrm.c_str(),fr.h1->qname.c_str(),fr.h1->pos,s.c_str(),new_s.c_str(),soft_len,effective_len);
+					//printf("effective_len < min_soft_clip_len:chr=%s,read=%s,read_pos=%d,fullsoftseq=%s,truncated_s=%s,softlen=%d,effective_len=%d\n",bb.chrm.c_str(),fr.h1->qname.c_str(),fr.h1->pos,s.c_str(),new_s.c_str(),soft_len,effective_len);
 					continue;
 				}
 
@@ -809,11 +808,10 @@ int bundle_bridge::get_more_chimeric()
 				double similarity = get_Jaccard(new_s,region_seq);
 				
 				if(similarity > min_jaccard)
-				//if(edit <= floor(soft_len/10))
 				{
-					printf("soft left clip: combo index=0, chrm=%s, read=%s, read_pos=%d, combo_seq=%s, similarity=%lf\n",bb.chrm.c_str(),fr.h1->qname.c_str(),fr.h1->pos,new_s.c_str(),similarity);
-					printf("region lpos = %d, rpos = %d\n",rc.lpos,rc.rpos);
-					printf("region_seq pos1=%d, pos2=%d, region_seqlen = %lu, region_seq=%s\n",pos1,pos2,region_seq.size(),region_seq.c_str());
+					// printf("soft left clip: combo index=0, chrm=%s, read=%s, read_pos=%d, combo_seq=%s, similarity=%lf\n",bb.chrm.c_str(),fr.h1->qname.c_str(),fr.h1->pos,new_s.c_str(),similarity);
+					// printf("region lpos = %d, rpos = %d\n",rc.lpos,rc.rpos);
+					// printf("region_seq pos1=%d, pos2=%d, region_seqlen = %lu, region_seq=%s\n",pos1,pos2,region_seq.size(),region_seq.c_str());
 					create_fake_supple(k,fr,effective_len,pos1,pos2,soft_clip_side);
 					rc_flag = 1;
 					left_soft[hash] = pair<int32_t,int32_t> (pos1,pos2);
@@ -843,7 +841,7 @@ int bundle_bridge::get_more_chimeric()
 			}
 
 			string s = tiny + fr.h2->soft_right_clip_seqs[0];
-			printf("name=%s,tiny:%s\n clip:%s, s=%s \n seq=%s\n",fr.h2->qname.c_str(),tiny.c_str(),fr.h2->soft_right_clip_seqs[0].c_str(),s.c_str(),fr.h2->seq.c_str());
+			//printf("name=%s,tiny:%s\n clip:%s, s=%s \n seq=%s\n",fr.h2->qname.c_str(),tiny.c_str(),fr.h2->soft_right_clip_seqs[0].c_str(),s.c_str(),fr.h2->seq.c_str());
 
 			//create a hash map for the kmers in soft clip region and pass that for similarity testing
 			/*int kmer_length = 10;
@@ -899,17 +897,16 @@ int bundle_bridge::get_more_chimeric()
 				double similarity = get_Jaccard(new_s,region_seq);
 
 				if(similarity > min_jaccard)
-				//if(edit <= floor(soft_len/10))
 				{
 					edit_match = 1;
-					printf("editmatch case 2: region seq pos1=%d, pos2=%d, region_seqlen = %lu\n",pos1,pos2,region_seq.size());
+					//printf("editmatch case 2: region seq pos1=%d, pos2=%d, region_seqlen = %lu\n",pos1,pos2,region_seq.size());
 				}
 				
 				if(edit_match == 1)
 				{
 					if(prev_pos1 != 0 && pos1 != prev_pos1)
 					{
-						printf("pos1 = %d, prev_pos1 = %d\n",pos1,prev_pos1);
+						//printf("pos1 = %d, prev_pos1 = %d\n",pos1,prev_pos1);
 						rc_multiple = 1;
 						break;
 					}
@@ -920,7 +917,7 @@ int bundle_bridge::get_more_chimeric()
 
 			if(rc_multiple == 1) 
 			{
-				printf("rc_multiple = %d, frag_name=%s\n",rc_multiple,fr.h2->qname.c_str());
+				//printf("rc_multiple = %d, frag_name=%s\n",rc_multiple,fr.h2->qname.c_str());
 				right_soft[hash] = pair<int32_t,int32_t> (-1,-1);
 				continue;
 			}
@@ -939,7 +936,7 @@ int bundle_bridge::get_more_chimeric()
 				string new_s = s.substr(0,effective_len);
 				if(effective_len < min_soft_clip_len)
 				{
-					printf("effective_len < min_soft_clip_len:chr=%s,read=%s,read_pos=%d,fullsoftseq=%s,truncated_s=%s,softlen=%d,effective_len=%d\n",bb.chrm.c_str(),fr.h2->qname.c_str(),fr.h2->pos,s.c_str(),new_s.c_str(),soft_len,effective_len);
+					//printf("effective_len < min_soft_clip_len:chr=%s,read=%s,read_pos=%d,fullsoftseq=%s,truncated_s=%s,softlen=%d,effective_len=%d\n",bb.chrm.c_str(),fr.h2->qname.c_str(),fr.h2->pos,s.c_str(),new_s.c_str(),soft_len,effective_len);
 					continue;
 				}
 
@@ -960,12 +957,11 @@ int bundle_bridge::get_more_chimeric()
 				double similarity = get_Jaccard(new_s,region_seq);
 
 				if(similarity > min_jaccard)
-				//if(edit <= floor(soft_len/10))
 				{
 					//printf("read seq combo index=%d, combo_seq=%s, edit=%d\n",i,fr.h2->soft_right_clip_seqs[i].c_str(),edit);
-					printf("soft right clip: combo index=0, chrm=%s, read=%s, read_pos=%d, combo_seq=%s, similarity=%lf\n",bb.chrm.c_str(),fr.h2->qname.c_str(),fr.h2->pos,new_s.c_str(),similarity);
-					printf("region lpos = %d, rpos = %d\n",rc.lpos,rc.rpos);
-					printf("region seq pos1=%d, pos2=%d, region_seqlen = %lu, region_seq=%s\n",pos1,pos2,region_seq.size(),region_seq.c_str());
+					// printf("soft right clip: combo index=0, chrm=%s, read=%s, read_pos=%d, combo_seq=%s, similarity=%lf\n",bb.chrm.c_str(),fr.h2->qname.c_str(),fr.h2->pos,new_s.c_str(),similarity);
+					// printf("region lpos = %d, rpos = %d\n",rc.lpos,rc.rpos);
+					// printf("region seq pos1=%d, pos2=%d, region_seqlen = %lu, region_seq=%s\n",pos1,pos2,region_seq.size(),region_seq.c_str());
 					create_fake_supple(k,fr,effective_len,pos1,pos2,soft_clip_side);
 					rc_flag = 1;
 					right_soft[hash] = pair<int32_t,int32_t> (pos1,pos2);
@@ -1054,10 +1050,10 @@ int bundle_bridge::build_supplementaries()
     {
         hit &h = bb.hits[i];
 
-		if(strcmp(h.qname.c_str(),"simulate:432512") == 0)
+		/*if(strcmp(h.qname.c_str(),"simulate:432512") == 0)
 		{
 			printf("Found read simulate:432512\n");
-		}
+		}*/
 
         // TODO
         if((h.flag & 0x800) == 0) continue;
@@ -1068,11 +1064,6 @@ int bundle_bridge::build_supplementaries()
         // do not use hi; as long as qname, pos and isize are identical
         // add 0x40 and 0x80
         int k = (h.qhash % max_index + (h.flag & 0x40) + (h.flag & 0x80)) % max_index;
-
-		if(strcmp(h.qname.c_str(),"simulate:432512") == 0)
-		{
-			printf("Found read supple simulate:432512, k=%d\n",k);
-		}
         vv[k].push_back(i);
         //printf("Adding supple\n");
     }
@@ -1093,14 +1084,6 @@ int bundle_bridge::build_supplementaries()
         for(int j = 0; j < vv[k].size(); j++)
         {
             hit &z = bb.hits[vv[k][j]];
-
-			if(strcmp(h.qname.c_str(),"simulate:432512") == 0)
-			{
-				printf("Found read z simulate:432512, k=%d\n",k);
-				z.print();
-				printf("Read h corr to read z:\n");
-				h.print();
-			}
 			
             //if(z.hi != h.hi) continue;
             //if(z.paired == true) continue;
@@ -2359,7 +2342,7 @@ int bundle_bridge::build_circ_fragments()
 			h1_supp_count++;
 			hit *h1_supple = fr.h1->suppl;
 
-			printf("\nchrm = %s\n",bb.chrm.c_str());
+			/*printf("\nchrm = %s\n",bb.chrm.c_str());
 			printf("fr.h1 has a supple hit.\n");
 			printf("Primary: ");
 			fr.h1->print();
@@ -2383,12 +2366,12 @@ int bundle_bridge::build_circ_fragments()
 			printf("\n");
 
 			printf("set_cigar p:%d-%d-%d\n",fr.h1->first_pos,fr.h1->second_pos,fr.h1->third_pos);
-			printf("set_cigar s:%d-%d-%d\n",fr.h1->suppl->first_pos,fr.h1->suppl->second_pos,fr.h1->suppl->third_pos);
+			printf("set_cigar s:%d-%d-%d\n",fr.h1->suppl->first_pos,fr.h1->suppl->second_pos,fr.h1->suppl->third_pos);*/
 
 			if(fr.h1->first_pos == 0 || fr.h1->suppl->first_pos == 0)
 			{
 				string combo = "special case h1s";
-				printf("%s\n",combo.c_str());
+				//printf("%s\n",combo.c_str());
 				if(frag2graph_freq.find(combo) == frag2graph_freq.end()) frag2graph_freq.insert(pair<string, int>(combo, 1));
 				else frag2graph_freq[combo] += 1;
 				continue;
@@ -2418,7 +2401,7 @@ int bundle_bridge::build_circ_fragments()
 
 			if(abs(len_HS - read_length) > 5) //here 100 is the estimated read length, replace this with any related exisiting parameter
 			{
-				printf("read length criteria unsatisfied h1s.\n");
+				//printf("read length criteria unsatisfied h1s.\n");
 				continue;
 			}
 
@@ -2455,7 +2438,7 @@ int bundle_bridge::build_circ_fragments()
 				if(fr.h1->second_pos <= fr.h2->pos && fr.h1->second_pos <= h1_supple->pos && h1_supple->second_pos >= fr.h1->rpos && h1_supple->second_pos >= fr.h2->rpos)
 				{
 					string combo = "Compatible h1p leftmost h1s rightmost";
-					printf("%s\n",combo.c_str());
+					//printf("%s\n",combo.c_str());
 					if(frag2graph_freq.find(combo) == frag2graph_freq.end()) frag2graph_freq.insert(pair<string, int>(combo, 1));
 					else frag2graph_freq[combo] += 1;
 					is_compatible = 1;
@@ -2507,7 +2490,7 @@ int bundle_bridge::build_circ_fragments()
 			h2_supp_count++;
 			hit *h2_supple = fr.h2->suppl;
 			
-			printf("\nchrm = %s\n",bb.chrm.c_str());
+			/*printf("\nchrm = %s\n",bb.chrm.c_str());
 			printf("fr.h2 has a supple hit.\n");
 			printf("h1: ");
 			fr.h1->print();
@@ -2531,14 +2514,14 @@ int bundle_bridge::build_circ_fragments()
 			printf("\n");
 
 			printf("set_cigar p:%d-%d-%d\n",fr.h2->first_pos,fr.h2->second_pos,fr.h2->third_pos);
-			printf("set_cigar s:%d-%d-%d\n",fr.h2->suppl->first_pos,fr.h2->suppl->second_pos,fr.h2->suppl->third_pos);
+			printf("set_cigar s:%d-%d-%d\n",fr.h2->suppl->first_pos,fr.h2->suppl->second_pos,fr.h2->suppl->third_pos);*/
 
 
 			if(fr.h2->first_pos == 0 || fr.h2->suppl->first_pos == 0)
 			{
 
 				string combo = "special case h2s";
-				printf("%s\n",combo.c_str());
+				//printf("%s\n",combo.c_str());
 				if(frag2graph_freq.find(combo) == frag2graph_freq.end()) frag2graph_freq.insert(pair<string, int>(combo, 1));
 				else frag2graph_freq[combo] += 1;
 				continue;
@@ -2568,7 +2551,7 @@ int bundle_bridge::build_circ_fragments()
 
 			if(abs(len_HS - read_length) > 5) //here 100 is the estimated read length, replace this with any related exisiting parameter
 			{
-				printf("read length criteria unsatisfied h2s.\n");
+				//printf("read length criteria unsatisfied h2s.\n");
 				continue;
 			}
 
@@ -2580,7 +2563,7 @@ int bundle_bridge::build_circ_fragments()
 				if(h2_supple->second_pos <= fr.h1->pos && h2_supple->second_pos <= fr.h2->pos && fr.h2->second_pos >= h2_supple->rpos && fr.h2->second_pos >= fr.h1->rpos)
 				{
 					string combo = "Compatible h2s leftmost h2p rightmost";
-					printf("%s\n",combo.c_str());
+					//printf("%s\n",combo.c_str());
 					if(frag2graph_freq.find(combo) == frag2graph_freq.end()) frag2graph_freq.insert(pair<string, int>(combo, 1));
 					else frag2graph_freq[combo] += 1;
 					is_compatible = 2;					
@@ -2742,12 +2725,7 @@ int bundle_bridge::build_circ_fragments()
 		{
 
 			//fr.h2 and fr.h1 needs to be paired by build_fragments()
-			if(fr.h2->paired != true || fr.h1->paired != true) //first set of fragment needs to be paired
-			{
-				printf("fr.h2 in first set not paired\n");
-				fr.h2->print();
-				continue;
-			}
+			if(fr.h2->paired != true || fr.h1->paired != true) continue; //first set of fragment needs to be paired
 			if(fr.h2->suppl->vlist.size() == 0) continue;
 
 			fr.h2->suppl->paired = true; //setting supple paired true to avoid assertion later in build hyper set
@@ -2823,7 +2801,7 @@ int bundle_bridge::build_circ_fragments()
 	//adding the second part fragments to fragments vector
 	if(circ_fragments.size() > 0)
 	{
-		printf("fragments vector size = %zu\n",fragments.size());		
+		//printf("fragments vector size = %zu\n",fragments.size());		
 	}
 	
 	//fragments.clear();
@@ -2836,7 +2814,7 @@ int bundle_bridge::build_circ_fragments()
 
 	if(circ_fragments.size() > 0)
 	{
-		printf("circ fragment vector size = %zu\n",circ_fragments.size());
+		//printf("circ fragment vector size = %zu\n",circ_fragments.size());
 	}
 
 	//check fragments order before bridging, same
@@ -3250,7 +3228,7 @@ int bundle_bridge::extract_circ_fragment_pairs()
 
 	if(circ_fragments.size() > 0)
 	{
-		printf("After bridging fragments vector size = %zu\n\n",fragments.size());		
+		//printf("After bridging fragments vector size = %zu\n\n",fragments.size());		
 	}
 
 	/*for(int i = 0; i < fragments.size(); i++)
@@ -3461,12 +3439,11 @@ int bundle_bridge::join_circ_fragment_pairs(int32_t length_high)
 		fragment &fr1 = circ_fragment_pairs[i].first;
 		fragment &fr2 = circ_fragment_pairs[i].second;
 
-		printf("\nPrinting separate fragments: chrm = %s",bb.chrm.c_str());
+		// printf("\nPrinting separate fragments: chrm = %s",bb.chrm.c_str());
+		// fr1.print(i+1);
+		// fr2.print(i+1);
 
-		fr1.print(i+1);
-		fr2.print(i+1);
-
-		if(fr1.paths.size() != 1)
+		/*if(fr1.paths.size() != 1)
 		{
 			printf("Not valid: fr1 paths size = %lu, read_name=%s, hit1_pos=%d, hit1_rpos=%d, hit2_pos=%d, hit2_rpos=%d\n",fr1.paths.size(),fr1.h1->qname.c_str(),fr1.h1->pos,fr1.h1->rpos,fr1.h2->pos,fr1.h2->rpos); 
 		}
@@ -3481,7 +3458,7 @@ int bundle_bridge::join_circ_fragment_pairs(int32_t length_high)
 			{
 				printf("Not valid fake: fr2 paths size = %lu, read_name=%s, hit1_pos=%d, hit1_rpos=%d, hit2_pos=%d, hit2_rpos=%d\n",fr2.paths.size(),fr2.h1->qname.c_str(),fr2.h1->pos,fr2.h1->rpos,fr2.h2->pos,fr2.h2->rpos);
 			}
-		}
+		}*/
 
 		if(fr1.paths.size() != 1 || fr2.paths.size() != 1)//not bridged
 		{
@@ -3490,8 +3467,8 @@ int bundle_bridge::join_circ_fragment_pairs(int32_t length_high)
 		
 		if(fr1.paths[0].length > length_high && fr2.paths[0].length > length_high)
 		{
-			printf("Not valid: both fragment length > length high\n");
-			printf("length_high = %d, fr1.path[0].length = %d, fr2.path[0].length = %d\n",length_high,fr1.paths[0].length,fr2.paths[0].length);
+			// printf("Not valid: both fragment length > length high\n");
+			// printf("length_high = %d, fr1.path[0].length = %d, fr2.path[0].length = %d\n",length_high,fr1.paths[0].length,fr2.paths[0].length);
 			continue;
 		}
 
@@ -3631,13 +3608,13 @@ int bundle_bridge::join_circ_fragment_pairs(int32_t length_high)
 
 			if((left_boundary_flag == 1 || pexon_left_flag == 1) && (right_boundary_flag == 1 || pexon_right_flag == 1))
 			{
-				printf("Found a case with junc comp 1\n");
-				printf("valid: left_boundary_flag = %d, right_boundary_flag = %d, circ left = %d, circ right = %d, bundle left = %d, bundle right = %d\n",left_boundary_flag, right_boundary_flag, fr1.lpos, fr2.rpos, bb.lpos, bb.rpos);
+				// printf("Found a case with junc comp 1\n");
+				// printf("valid: left_boundary_flag = %d, right_boundary_flag = %d, circ left = %d, circ right = %d, bundle left = %d, bundle right = %d\n",left_boundary_flag, right_boundary_flag, fr1.lpos, fr2.rpos, bb.lpos, bb.rpos);
 				join_circ_fragment_pair(circ_fragment_pairs[i],0,0,left_boundary_flag,right_boundary_flag);
 			}
 			else
 			{
-				printf("Not valid: left_boundary_flag = %d, right_boundary_flag = %d, circ left = %d, circ right = %d, bundle left = %d, bundle right = %d\n",left_boundary_flag, right_boundary_flag, fr1.lpos, fr2.rpos, bb.lpos, bb.rpos);
+				// printf("Not valid: left_boundary_flag = %d, right_boundary_flag = %d, circ left = %d, circ right = %d, bundle left = %d, bundle right = %d\n",left_boundary_flag, right_boundary_flag, fr1.lpos, fr2.rpos, bb.lpos, bb.rpos);
 			}
 		}
 		else if(fr2.is_compatible == 2)
@@ -3762,13 +3739,13 @@ int bundle_bridge::join_circ_fragment_pairs(int32_t length_high)
 
 			if((left_boundary_flag == 1 || pexon_left_flag == 1) && (right_boundary_flag == 1 || pexon_right_flag == 1))
 			{
-				printf("Found a case with junc comp 2\n");
-				printf("valid: left_boundary_flag = %d, right_boundary_flag = %d, circ left = %d, circ right = %d, bundle left = %d, bundle right = %d\n",left_boundary_flag, right_boundary_flag, fr2.lpos, fr1.rpos, bb.lpos, bb.rpos);
+				// printf("Found a case with junc comp 2\n");
+				// printf("valid: left_boundary_flag = %d, right_boundary_flag = %d, circ left = %d, circ right = %d, bundle left = %d, bundle right = %d\n",left_boundary_flag, right_boundary_flag, fr2.lpos, fr1.rpos, bb.lpos, bb.rpos);
 				join_circ_fragment_pair(circ_fragment_pairs[i],0,0,left_boundary_flag,right_boundary_flag);
 			}
 			else
 			{
-				printf("Not valid: left_boundary_flag = %d, right_boundary_flag = %d, circ left = %d, circ right = %d, bundle left = %d, bundle right = %d\n",left_boundary_flag, right_boundary_flag, fr2.lpos, fr1.rpos, bb.lpos, bb.rpos);
+				// printf("Not valid: left_boundary_flag = %d, right_boundary_flag = %d, circ left = %d, circ right = %d, bundle left = %d, bundle right = %d\n",left_boundary_flag, right_boundary_flag, fr2.lpos, fr1.rpos, bb.lpos, bb.rpos);
 			}
 		}
 	}
@@ -3819,9 +3796,9 @@ int bundle_bridge::join_circ_fragment_pair(pair<fragment,fragment> &fr_pair, int
 		p.v.insert(p.v.end(), it + 1, v2.end());
 		//p.v = encode_vlist(p.v);
 
-		printf("Printing merged path in fr2 iscomp 1:\n");
-		printv(p.v);
-		printf("\n\n");
+		// printf("Printing merged path in fr2 iscomp 1:\n");
+		// printv(p.v);
+		// printf("\n\n");
 	
 		string chrm_id = bb.chrm.c_str();
 		string circRNA_id = chrm_id + ":" + tostring(fr1.lpos) + "|" + tostring(fr2.rpos) + "|";
@@ -3958,9 +3935,9 @@ int bundle_bridge::join_circ_fragment_pair(pair<fragment,fragment> &fr_pair, int
 		p.v.insert(p.v.end(), it + 1, v1.end());
 		//p.v = encode_vlist(p.v);
 
-		printf("Printing merged path in fr2 iscomp 2:\n");
-		printv(p.v);
-		printf("\n\n");
+		// printf("Printing merged path in fr2 iscomp 2:\n");
+		// printv(p.v);
+		// printf("\n\n");
 		
 		string chrm_id = bb.chrm.c_str();
 		string circRNA_id = chrm_id + ":" + tostring(fr2.lpos) + "|" + tostring(fr1.rpos) + "|";
@@ -4074,7 +4051,7 @@ int bundle_bridge::join_circ_fragment_pair(pair<fragment,fragment> &fr_pair, int
 	}
 	else
 	{
-		printf("is_compatible not 1 or 2\n");
+		//printf("is_compatible not 1 or 2\n");
 	}
 
 	return 0;
@@ -4098,7 +4075,7 @@ char bundle_bridge::infer_circ_strand(const vector<int> &p)
 	}
 	if(n2 >= 1 && n1 <= 0 && n3 <= 0) return '+';
 	if(n3 >= 1 && n1 <= 0 && n2 <= 0) return '-';
-	printf("MIXED JUNCTION: ./+/- = %d/%d/%d\n", n1, n2, n3);
+	//printf("MIXED JUNCTION: ./+/- = %d/%d/%d\n", n1, n2, n3);
 	return '.';
 }
 

@@ -183,6 +183,8 @@ int assembler::assemble()
 	print_circular_trsts();
 	write_circular();
 	write_feature();
+
+	printf("TERRACE run complete!");
 	
 	return 0;
 }
