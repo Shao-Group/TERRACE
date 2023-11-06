@@ -34,9 +34,6 @@ to additional explanations below the table.
  --version | | print version of TERRACE and exit
  --preview | | show the inferred `library_type` and exit
  --library_type               | empty | chosen from {empty, unstranded, first, second}
- --max_num_cigar              | 1000 | ignore reads with CIGAR size larger than this value
- --min_bundle_gap             | 100 | the minimum distances required to start a new bundle
-
 
 `--library_type` is highly recommended to provide. The `unstranded`, `first`, and `second`
 correspond to `fr-unstranded`, `fr-firststrand`, and `fr-secondstrand` used in standard Illumina
