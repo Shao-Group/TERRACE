@@ -4,7 +4,7 @@ TERRACE is a circRNA assembler for paired-end RNA-seq data.
 
 # Installation
 
-TERRACE uses additional libraries of htslib. 
+TERRACE uses an additional library of htslib. 
 If it has not been installed in your system, you first
 need to download and install them. You might also need to
 export the runtime library path to certain environmental
