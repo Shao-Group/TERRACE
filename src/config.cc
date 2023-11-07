@@ -518,7 +518,7 @@ int print_help()
 	//printf(" %-42s  %s\n", "--preview",  "determine fragment-length-range and library-type and exit");
 	//printf(" %-42s  %s\n", "--verbose <0, 1, 2>",  "0: quiet; 1: one line for each graph; 2: with details, default: 1");
 	//printf(" %-42s  %s\n", "-f/--transcript_fragments <filename>",  "file to which the assembled non-full-length transcripts will be written to");
-	printf(" %-42s  %s\n", "--library_type <first, second, unstranded>",  "library type of the sample, default: unstranded");
+	printf(" %-42s  %s\n", "--library_type <empty, unstranded, first, second>",  "library type of the sample, default: empty");
 	//printf(" %-42s  %s\n", "--min_transcript_coverage <float>",  "minimum coverage required for a multi-exon transcript, default: 1.5");
 	//printf(" %-42s  %s\n", "--min_single_exon_coverage <float>",  "minimum coverage required for a single-exon transcript, default: 20");
 	//printf(" %-42s  %s\n", "--min_transcript_length_increase <integer>",  "default: 50");
