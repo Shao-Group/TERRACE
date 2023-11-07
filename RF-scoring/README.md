@@ -1,4 +1,4 @@
-# Generatin Scores using CircRNA Random Forest Classifier
+# Generating Scores using CircRNA Random Forest Classifier
 
 We provide Python script `random_forest_train_test.py` which is designed to test a Random Forest classifier on circular RNA (circRNA) datasets based on a pretrained model (trained on human brain sample).
 
