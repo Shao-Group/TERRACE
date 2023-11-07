@@ -12,7 +12,7 @@ variable (for example, `LD_LIBRARY_PATH`, for most linux distributions).
 After installing this dependency, you then compile the source code of TERRACE.
 If the dependency is not installed to the default system 
 directories (for example, `/usr/local`, for most linux distributions),
-its corresponding installing paths should be specified to `configure` of TERRACE.
+its corresponding installing path should be specified to `configure` of TERRACE.
 
 ## Install htslib
 If htslib has not been installed, download htslib 
