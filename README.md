@@ -69,7 +69,7 @@ Make sure that it is sorted; otherwise run `samtools` to sort it:
 ```
 samtools sort input.bam > input.sort.bam
 ```
-The reconstructed circular transcripts shall be written as GTF format into `output.gtf`.
+The reconstructed circular transcripts shall be written as GTF format into `output.gtf`. Detailed documentation about [GTF format](https://useast.ensembl.org/info/website/upload/gff.html) is available from Ensembl.
 
 `reference-genome.fa` is the reference genome file in fasta format. Recommended - Gencode GRCh37/GRCh38.
 
