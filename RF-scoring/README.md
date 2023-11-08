@@ -58,6 +58,6 @@ python3 integrate.py <output.gtf> <prefix.feature_file.prob.csv> <output-with-sc
 
 `prefix.feature_file.prob.csv` is a list of circRNA_id and score tuples generated from the Random Forest testing commands.
 
-`output-with-score.gtf` is a modified GTF file with the same list of circRNAs as in `output.gtf` but the `score` field changed to represent Random Forest scores in the range 0 to 1 instead of abundance.
+`output-with-score.gtf` is a modified GTF file with the same list of circRNAs as in `output.gtf` but the `score` field changed to represent Random Forest scores instead of abundance.
 
 
