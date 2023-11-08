@@ -44,7 +44,7 @@ This command will:
 2. Test the model using the provided testing data files.
 3. Output the prediction probabilities (scores) to files following the pattern output_folder/prefix.feature_file.prob.csv, with circRNA_id followed by the corresponding probabilities (scores) in the range 0 to 1.
 
-An example feature_file `feature_file` and the generated probabilities/score file `test.feature_file.prob.csv` using the above commands are provided in the `example` folder for reference.
+An example feature file `feature_file` and the generated probabilities/score file `test.feature_file.prob.csv` using the above commands are provided in the `example` folder for reference.
 
 # Integrating the Scores
 
