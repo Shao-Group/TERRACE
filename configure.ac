@@ -2,7 +2,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.63])
-AC_INIT(terrace, 1.0.0, tkz5115@psu.edu)
+AC_INIT(terrace, 1.1.1, tkz5115@psu.edu)
 AM_INIT_AUTOMAKE()
 AC_CONFIG_SRCDIR([src/main.cc])
 AC_CONFIG_HEADERS([config.h])
@@ -17,10 +17,12 @@ AC_PROG_RANLIB
 #AS_IF([test "s$BOOST_HOME" = "s"],[AC_MSG_ERROR([*** Please set environment variable BOOST_HOME ***])]) 
 
 # Check home directories for external libraries
+AC_ARG_WITH(boost, AS_HELP_STRING([--with-boost], [home directory for boost]), BOOST_HOME=$withval, BOOST_HOME=)
 AC_ARG_WITH(htslib, AS_HELP_STRING([--with-htslib], [home directory for htslib]), HTSLIB_HOME=$withval, HTSLIB_HOME=)
 AC_ARG_WITH(zlib, AS_HELP_STRING([--with-zlib], [home directory for zlib]), ZLIB_HOME=$withval, ZLIB_HOME=)
 
 # Assign CXXFLAGS
+AS_IF([test "x$BOOST_HOME" != "x"], [AC_SUBST([CXXFLAGS], ["-I$BOOST_HOME $CXXFLAGS"])], [])
 AS_IF([test "x$HTSLIB_HOME" != "x"], [AC_SUBST([CXXFLAGS], ["-I$HTSLIB_HOME/include $CXXFLAGS"])], [])
 
 # Check whether static is enabled

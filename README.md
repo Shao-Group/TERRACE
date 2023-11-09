@@ -4,15 +4,21 @@ TERRACE is a circRNA assembler for paired-end RNA-seq data.
 
 # Installation
 
-TERRACE uses an additional library of htslib. 
-If it has not been installed in your system, you first
+TERRACE uses additional libraries of Boost and htslib. 
+If they have not been installed in your system, you first
 need to download and install them. You might also need to
 export the runtime library path to certain environmental
 variable (for example, `LD_LIBRARY_PATH`, for most linux distributions).
-After installing this dependency, you then compile the source code of TERRACE.
-If the dependency is not installed to the default system 
+After install these dependencies, you then compile the source code of TERRACE.
+If some of the above dependencies are not installed to the default system 
 directories (for example, `/usr/local`, for most linux distributions),
-its corresponding installing path should be specified to `configure` of TERRACE.
+their corresponding installing paths should be specified to `configure` of TERRACE.
+The entire installation typically takes a few minutes to complete.
+
+## Download Boost
+If Boost has not been downloaded/installed, download Boost
+[(license)](http://www.boost.org/LICENSE_1_0.txt) from (http://www.boost.org).
+Uncompress it somewhere (compiling and installing are not necessary).
 
 ## Install htslib
 If htslib has not been installed, download htslib 
@@ -49,7 +55,7 @@ export LD_LIBRARY_PATH=/path/to/your/htslib/lib:$LD_LIBRARY_PATH
 
 Use the following to compile TERRACE:
 ```
-./configure --with-htslib=/path/to/your/htslib
+./configure --with-htslib=/path/to/your/htslib --with-boost=/path/to/your/boost
 make
 ```
 
