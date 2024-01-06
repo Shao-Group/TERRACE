@@ -55,6 +55,10 @@ export LD_LIBRARY_PATH=/path/to/your/htslib/lib:$LD_LIBRARY_PATH
 
 Use the following to compile TERRACE:
 ```
+aclocal
+autoconf
+autoheader
+automake -a
 ./configure --with-htslib=/path/to/your/htslib --with-boost=/path/to/your/boost
 make
 ```
