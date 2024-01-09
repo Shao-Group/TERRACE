@@ -109,7 +109,7 @@ string feature_file = "";
 // for controling
 int batch_bundle_size = 100;
 int verbose = 0;//1
-string version = "v1.1.2";
+string version = "v1.1.1";
 
 
 //for extracting BSJ
