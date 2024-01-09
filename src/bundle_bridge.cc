@@ -123,8 +123,11 @@ int bundle_bridge::build(map <string, int> RO_reads_map, faidx_t *_fai)
 	//RO reads statistics
 	//get_frags_with_HS_on_both_sides();
 
-	//find more chimeric reads from soft clip reads
-	get_more_chimeric();
+	//find more chimeric reads from soft clip reads only if refrence genome parameter is given.
+	if(fasta_file != "")
+	{
+		get_more_chimeric();
+	}
 
 	//create vlist of fake hits
 	align_fake_hits();

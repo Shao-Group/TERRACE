@@ -182,9 +182,13 @@ int assembler::assemble()
 	remove_duplicate_circ_trsts();
 	print_circular_trsts();
 	write_circular();
-	write_feature();
 
-	printf("TERRACE run complete!");
+	if(feature_file != "")
+	{
+		write_feature();
+	}
+
+	printf("TERRACE run complete!\n");
 	
 	return 0;
 }
@@ -703,7 +707,7 @@ int assembler::write_circular()
 	
 	if(fcirc.fail())
 	{
-		printf("failed");
+		printf("failed circular");
 		return 0;
 	}
 
@@ -733,7 +737,7 @@ int assembler::write_feature()
 	
 	if(fout.fail())
 	{
-		printf("failed");
+		printf("failed feature");
 		return 0;
 	}
 
