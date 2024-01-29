@@ -99,5 +99,5 @@ A GTF file with the integrated scores `example-output-with-score.gtf` will be cr
 python3 ../precise.py example-output-with-score.gtf precise.gtf 0.8
 ```
 
-A precise GTF `precise.gtf` containing circRNAs with score above 0.8 will be created.  
+A precise GTF file `precise.gtf` containing circRNAs with score above 0.8 will be created.  
 
