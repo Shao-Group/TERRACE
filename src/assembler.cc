@@ -44,6 +44,10 @@ assembler::assembler(reference &r)
 	HS_both_side_reads.clear();
 	RO_reads_map.clear();
 	RO_count = 0;
+	total_frag_count = 0;
+	only_ref_path_frag_count = 0;
+	single_ref_chosen_count = 0;
+	multi_ref_chosen_count = 0;
 	read_cirifull_file();
 
 	/*if(fai != NULL)
@@ -178,6 +182,11 @@ int assembler::assemble()
 	// printf("#RO_count hits = %d\n",RO_count);
 	//write_RO_info();
 
+	// printf("total number of fragments = %d\n",total_frag_count);
+	// printf("total number of fragments that choose only ref path = %d\n",only_ref_path_frag_count);
+	// printf("total number of fragments that choose only ref path, ref size 1: %d\n",single_ref_chosen_count);
+	// printf("total number of fragments that choose only ref path, ref size > 1: %d\n",multi_ref_chosen_count);
+
 	remove_long_exon_circ_trsts();
 	remove_duplicate_circ_trsts();
 	print_circular_trsts();
@@ -240,6 +249,10 @@ int assembler::process(int n)
 		bundle_bridge br(bb, ref, RO_reads_map, fai);
 
 		RO_count += br.RO_count;
+		total_frag_count += br.total_frag_count;
+		only_ref_path_frag_count += br.only_ref_path_frag_count;
+		single_ref_chosen_count += br.single_ref_chosen_count;
+		multi_ref_chosen_count += br.multi_ref_chosen_count;
 
 		circular_trsts.insert(circular_trsts.end(), br.circ_trsts.begin(), br.circ_trsts.end());
 
@@ -516,6 +529,7 @@ int assembler::remove_duplicate_circ_trsts()
 	{
 		circular_transcript &circ = itn->second.first;
 		circ.coverage = itn->second.second;
+		//circ.score = circ.score/circ.bundle_size;
 		//printf("key = %s, count = %d\n",itn->first.c_str(),itn->second.second);
 	}
 

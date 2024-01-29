@@ -41,7 +41,7 @@ int genome::read(const string &file)
 	if(fin.fail())
 	{
 		printf("open file %s error\n", file.c_str());
-		return 0;
+		exit(0);
 	}
 
 	char line[102400];

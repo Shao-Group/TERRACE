@@ -58,6 +58,10 @@ private:
 	vector<RO_read> RO_reads; //list of RO reads from CIRI-full simu_ro2_info.list
 	map <string, int> RO_reads_map; //map of RO read name concatenated with chrm
 	int RO_count;
+	int total_frag_count;	//for statistics of how many frags choose only ref path
+	int only_ref_path_frag_count;	//for statistics of how many frags choose only ref path
+	int single_ref_chosen_count;	//for statistics of how many frags choose only ref path when refsize is 1
+	int multi_ref_chosen_count;	//for statistics of how many frags choose only ref path when refsize is > 1
 
 public:
 	int assemble();

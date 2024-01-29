@@ -68,6 +68,9 @@ extern int alignment_boundary_error;
 extern double max_fset_score;
 extern int min_soft_clip_len;
 extern double min_jaccard;
+extern bool fa_parameter;
+extern bool r_parameter;
+extern bool fe_parameter;
 
 // for bam file and reads
 extern int min_flank_length;

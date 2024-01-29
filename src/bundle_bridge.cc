@@ -27,6 +27,10 @@ bundle_bridge::bundle_bridge(bundle_base &b, reference &r)
 	circ_trsts_HS.clear();
 	circ_fragments.clear();
 	RO_count = 0;
+	total_frag_count = 0;
+	only_ref_path_frag_count = 0;
+	single_ref_chosen_count = 0;
+	multi_ref_chosen_count = 0;
 
 	compute_strand();
 	ref_trsts = ref.get_overlapped_transcripts(bb.chrm, bb.strand, bb.lpos, bb.rpos);
@@ -40,6 +44,10 @@ bundle_bridge::bundle_bridge(bundle_base &b, reference &r, map <string, int> RO_
 	circ_trsts_HS.clear();
 	circ_fragments.clear();
 	RO_count = 0;
+	total_frag_count = 0;
+	only_ref_path_frag_count = 0;
+	single_ref_chosen_count = 0;
+	multi_ref_chosen_count = 0;
 
 	compute_strand();
 	ref_trsts = ref.get_overlapped_transcripts(bb.chrm, bb.strand, bb.lpos, bb.rpos);
@@ -898,6 +906,10 @@ int bundle_bridge::get_more_chimeric()
 				//int edit = get_edit_distance(new_s,region_seq);
 
 				double similarity = get_Jaccard(new_s,region_seq);
+				if(strcmp(fr.h1->qname.c_str(),"simulate:30231")==0)
+				{
+					printf("simulate:30231 effective_len=%d, sim==%lf, read_seq=%s, region_seq=%s, region_lpos=%d\n",effective_len,similarity,new_s.c_str(),region_seq.c_str(),rc.lpos);
+				}
 
 				if(similarity > min_jaccard)
 				{
@@ -2330,9 +2342,9 @@ int bundle_bridge::build_circ_fragments()
 	for(int k = 0; k < fragments.size(); k++)
 	{
 		fragment &fr = fragments[k];
-		/*if(strcmp(fr.h1->qname.c_str(),"simulate:311116") == 0)
+		/*if(strcmp(fr.h1->qname.c_str(),"simulate:34996") == 0)
 		{
-			printf("simulate:311116 is in build_circ_fragments\n");
+			printf("simulate:34996 is in build_circ_fragments\n");
 		}*/
 
 		int is_compatible = 0; //1 for h1 has a suppl and compatible, 2 for h2 has a suppl and compatible
@@ -2646,6 +2658,8 @@ int bundle_bridge::build_circ_fragments()
 		//if compatible h1s
 		if(is_compatible == 1)
 		{
+			if(strcmp(fr.h1->qname.c_str(),"simulate:34996") == 0) printf("simulate.34996 exists in build circ_frags comp 1\n");
+			
 			//if(bb.hits[x].vlist.size() == 0) continue;
 			//printf("vlist size = %zu",fr.h2->vlist.size());
 			//printf("vlist size = %zu",fr.h1->suppl->vlist.size());
@@ -2726,6 +2740,7 @@ int bundle_bridge::build_circ_fragments()
 		}
 		else if(is_compatible == 2)
 		{
+			if(strcmp(fr.h1->qname.c_str(),"simulate.34996")==0) printf("simulate.34996 exists in build circ_frags comp 2\n");
 
 			//fr.h2 and fr.h1 needs to be paired by build_fragments()
 			if(fr.h2->paired != true || fr.h1->paired != true) continue; //first set of fragment needs to be paired
@@ -3442,6 +3457,11 @@ int bundle_bridge::join_circ_fragment_pairs(int32_t length_high)
 		fragment &fr1 = circ_fragment_pairs[i].first;
 		fragment &fr2 = circ_fragment_pairs[i].second;
 
+		if(strcmp(fr1.h1->qname.c_str(),"simulate:34996") == 0)
+		{
+			printf("simulate.34996 exists in join\n");
+		}
+
 		// printf("\nPrinting separate fragments: chrm = %s",bb.chrm.c_str());
 		// fr1.print(i+1);
 		// fr2.print(i+1);
@@ -3611,13 +3631,19 @@ int bundle_bridge::join_circ_fragment_pairs(int32_t length_high)
 
 			if((left_boundary_flag == 1 || pexon_left_flag == 1) && (right_boundary_flag == 1 || pexon_right_flag == 1))
 			{
-				// printf("Found a case with junc comp 1\n");
-				// printf("valid: left_boundary_flag = %d, right_boundary_flag = %d, circ left = %d, circ right = %d, bundle left = %d, bundle right = %d\n",left_boundary_flag, right_boundary_flag, fr1.lpos, fr2.rpos, bb.lpos, bb.rpos);
+				if(strcmp(fr1.h1->qname.c_str(),"simulate:34996") == 0)
+				{
+					printf("Found a case with junc comp 1\n");
+					printf("valid: left_boundary_flag = %d, right_boundary_flag = %d, circ left = %d, circ right = %d, bundle left = %d, bundle right = %d\n",left_boundary_flag, right_boundary_flag, fr1.lpos, fr2.rpos, bb.lpos, bb.rpos);
+				}
 				join_circ_fragment_pair(circ_fragment_pairs[i],0,0,left_boundary_flag,right_boundary_flag);
 			}
 			else
 			{
-				// printf("Not valid: left_boundary_flag = %d, right_boundary_flag = %d, circ left = %d, circ right = %d, bundle left = %d, bundle right = %d\n",left_boundary_flag, right_boundary_flag, fr1.lpos, fr2.rpos, bb.lpos, bb.rpos);
+				if(strcmp(fr1.h1->qname.c_str(),"simulate:34996") == 0)
+				{
+					printf("Not valid: left_boundary_flag = %d, right_boundary_flag = %d, circ left = %d, circ right = %d, bundle left = %d, bundle right = %d\n",left_boundary_flag, right_boundary_flag, fr1.lpos, fr2.rpos, bb.lpos, bb.rpos);
+				}
 			}
 		}
 		else if(fr2.is_compatible == 2)

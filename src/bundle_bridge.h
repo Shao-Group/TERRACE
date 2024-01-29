@@ -45,6 +45,10 @@ public:
 	vector<string> HS_both_side_reads; //for statistics of RO reads from CIRI-full
 	vector<string> chimeric_reads; //for statistics of RO reads from CIRI-full
 	int RO_count;
+	int total_frag_count;		//for statistics of how many frags choose only ref path
+	int only_ref_path_frag_count;	//for statistics of how many frags choose only ref path
+	int single_ref_chosen_count;	//for statistics of how many frags choose only ref path when refsize is 1
+	int multi_ref_chosen_count;	//for statistics of how many frags choose only ref path when refsize is > 1
 
 	vector<junction> junctions;			// splice junctions
 	vector<junction> filtered_junctions; // junctions with higher support count

@@ -1770,9 +1770,16 @@ int bridger::filter_paths(vector<fragment> &frags)
 
 int bridger::pick_bridge_path(vector<fragment> &frags)
 {
+	int all_count = 0;
+	int only_ref_count = 0;
+	int single_ref_count = 0;
+	int multi_ref_count = 0;
+
 	//printf("1.5*length_high = %lf\n",1.5*length_high);
 	for(int k = 0; k < frags.size(); k++)
 	{
+		all_count++;
+
 		fragment &fr = frags[k];
 
 		if(fr.paths.size() <= 0) 
@@ -2140,6 +2147,13 @@ int bridger::pick_bridge_path(vector<fragment> &frags)
 			}
 		}
 
+		//not use discard path with score < min_pathscore
+		/*selected_paths.clear();
+		for(int i=0;i<primary_selected_paths.size();i++)
+		{
+			selected_paths.push_back(primary_selected_paths[i]);
+		}*/
+
 		//check if selected paths is zero
 		if(selected_paths.size() == 0)
 		{
@@ -2290,7 +2304,23 @@ int bridger::pick_bridge_path(vector<fragment> &frags)
 				// later on we can take the #counts in reference into account
 
 				best_path = ref_paths_map.begin()->second.first;
+				only_ref_count++;
 
+				if(ref_paths_map.size() == 1) single_ref_count++;
+				else if(ref_paths_map.size() > 1) multi_ref_count++;
+
+				//discard this frag if comes to only ref
+				// fr.set_bridged(false);
+				// fr.paths.resize(0);
+				// continue;
+
+				//discard this frag if comes to only ref and ref size > 1
+				// if(ref_paths_map.size() > 1)
+				// {
+				// 	fr.set_bridged(false);
+				// 	fr.paths.resize(0);
+				// 	continue;
+				// }
 			}
 		}
 
@@ -2308,6 +2338,11 @@ int bridger::pick_bridge_path(vector<fragment> &frags)
 		assert(fr.paths.size() == 1);
 		fr.set_bridged(true);
 	}
+
+	bd->total_frag_count = all_count;
+	bd->only_ref_path_frag_count = only_ref_count;
+	bd->single_ref_chosen_count = single_ref_count;
+	bd->multi_ref_chosen_count = multi_ref_count;
 	return 0;
 }
 

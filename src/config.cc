@@ -37,6 +37,9 @@ int alignment_boundary_error = 5; //allow this much error when fixing alignment 
 double max_fset_score = 1.5; //bottleneck should be close to number of reads, define close as this
 int min_soft_clip_len = 15; // for new chimeric reads soft_len needs to be greater than this to be considered
 double min_jaccard = 0.9; //new chimeric similarity threshold
+bool fa_parameter = false;
+bool r_parameter = false;
+bool fe_parameter = false;
 
 // for bam file and reads
 int min_flank_length = 0; //3
@@ -151,22 +154,25 @@ int parse_arguments(int argc, const char ** argv)
 		}
 		else if(string(argv[i]) == "-fa")
 		{
+			fa_parameter= true;
 			fasta_file = string(argv[i + 1]);
 			i++;
 		}
 		else if(string(argv[i]) == "-fe")
 		{
+			fe_parameter = true;
 			feature_file = string(argv[i + 1]);
+			i++;
+		}
+		else if(string(argv[i]) == "-r")
+		{
+			r_parameter = true;
+			ref_file = string(argv[i + 1]);
 			i++;
 		}
 		else if(string(argv[i]) == "--transcript_fragments")
 		{
 			output_file1 = string(argv[i + 1]);
-			i++;
-		}
-		else if(string(argv[i]) == "-r")
-		{
-			ref_file = string(argv[i + 1]);
 			i++;
 		}
 
@@ -439,6 +445,24 @@ int parse_arguments(int argc, const char ** argv)
 		exit(0);
 	}
 
+	// if(fasta_file == "" && fa_parameter == true)
+	// {
+	// 	printf("error: genome fasta file is missing.\n");
+	// 	exit(0);
+	// }
+
+	// if(feature_file == "" && fe_parameter == true)
+	// {
+	// 	printf("error: feature file name is missing.\n");
+	// 	exit(0);
+	// }
+
+	// if(ref_file == "" && r_parameter == true)
+	// {
+	// 	printf("error: reference gene annotation file is missing.\n");
+	// 	exit(0);
+	// }
+
 	/*if(output_circ_file == "" && preview_only == false)
 	{
 		printf("error: output-file for circRNA is missing.\n");
@@ -452,14 +476,32 @@ int print_parameters()
 {
 	printf("parameters:\n");
 
+	//circRNA
+	printf("read_length = %d\n", read_length);
+	printf("min_pathscore = %d\n", min_pathscore);
+	printf("max_softclip_to_junction_gap = %d\n", max_softclip_to_junction_gap);
+	printf("min_junction_count = %d\n", min_junction_count);
+	printf("min_junction_count_ratio = %lf\n", min_junction_count_ratio);
+	printf("max_circ_vsize = %d\n", max_circ_vsize);
+	printf("max_single_exon_length = %d\n", max_single_exon_length);
+	printf("max_multi_exon_length = %d\n", max_multi_exon_length);
+	printf("same_chain_circ_end_diff = %d\n", same_chain_circ_end_diff);
+	printf("alignment_boundary_error = %d\n", alignment_boundary_error);
+	printf("max_fset_score = %lf\n", max_fset_score);
+	printf("min_soft_clip_len = %d\n", min_soft_clip_len);
+	printf("min_jaccard = %lf\n", min_jaccard);
+	printf("fa_parameter = %d\n", fa_parameter);
+	printf("fe_parameter = %d\n", fe_parameter);
+	printf("r_parametetr = %d\n", r_parameter);
+
 	// for bam file and reads
-	printf("min_flank_length = %d\n", min_flank_length);
-	printf("max_num_cigar = %d\n", max_num_cigar);
-	printf("max_edit_distance = %d\n", max_edit_distance);
-	printf("min_bundle_gap = %d\n", min_bundle_gap);
-	printf("min_num_hits_in_bundle = %d\n", min_num_hits_in_bundle);
-	printf("min_mapping_quality = %d\n", min_mapping_quality);
-	printf("min_splice_boundary_hits = %d\n", min_splice_boundary_hits);
+	// printf("min_flank_length = %d\n", min_flank_length);
+	// printf("max_num_cigar = %d\n", max_num_cigar);
+	// printf("max_edit_distance = %d\n", max_edit_distance);
+	// printf("min_bundle_gap = %d\n", min_bundle_gap);
+	// printf("min_num_hits_in_bundle = %d\n", min_num_hits_in_bundle);
+	// printf("min_mapping_quality = %d\n", min_mapping_quality);
+	// printf("min_splice_boundary_hits = %d\n", min_splice_boundary_hits);
 
 	// for preview
 	printf("preview_only = %c\n", preview_only ? 'T' : 'F');
@@ -469,27 +511,29 @@ int print_parameters()
 	printf("preview_infer_ratio = %.3lf\n", preview_infer_ratio);
 
 	// for identifying subgraphs
-	printf("min_subregion_gap = %d\n", min_subregion_gap);
-	printf("min_subregion_len = %d\n", min_subregion_len);
-	printf("min_subregion_max = %d\n", min_subregion_max);
-	printf("min_subregion_ave = %.2lf\n", min_subregion_ave);
+	// printf("min_subregion_gap = %d\n", min_subregion_gap);
+	// printf("min_subregion_len = %d\n", min_subregion_len);
+	// printf("min_subregion_max = %d\n", min_subregion_max);
+	// printf("min_subregion_ave = %.2lf\n", min_subregion_ave);
 
 	// for input and output
 	printf("algo = %s\n", algo.c_str());
 	printf("input_file = %s\n", input_file.c_str());
-	printf("ref_file = %s\n", ref_file.c_str());
-	printf("ref_file1 = %s\n", ref_file1.c_str());
-	printf("ref_file2 = %s\n", ref_file2.c_str());
 	printf("output_file = %s\n", output_file.c_str());
-	printf("output_file1 = %s\n", output_file1.c_str());
-	printf("output_circ_file = %s\n", output_circ_file.c_str());
+	printf("ref_file = %s\n", ref_file.c_str());
+	printf("fasta_file = %s\n", fasta_file.c_str());
+	printf("feature_file = %s\n", feature_file.c_str());
+	// printf("ref_file1 = %s\n", ref_file1.c_str());
+	// printf("ref_file2 = %s\n", ref_file2.c_str());
+	// printf("output_file1 = %s\n", output_file1.c_str());
+	// printf("output_circ_file = %s\n", output_circ_file.c_str());
 
 	// for controling
 	printf("library_type = %d\n", library_type);
-	printf("use_second_alignment = %c\n", use_second_alignment ? 'T' : 'F');
-	printf("uniquely_mapped_only = %c\n", uniquely_mapped_only ? 'T' : 'F');
-	printf("verbose = %d\n", verbose);
-	printf("batch_bundle_size = %d\n", batch_bundle_size);
+	// printf("use_second_alignment = %c\n", use_second_alignment ? 'T' : 'F');
+	// printf("uniquely_mapped_only = %c\n", uniquely_mapped_only ? 'T' : 'F');
+	// printf("verbose = %d\n", verbose);
+	// printf("batch_bundle_size = %d\n", batch_bundle_size);
 
 	printf("\n");
 
