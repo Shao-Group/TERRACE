@@ -2315,12 +2315,12 @@ int bridger::pick_bridge_path(vector<fragment> &frags)
 				// continue;
 
 				//discard this frag if comes to only ref and ref size > 1
-				// if(ref_paths_map.size() > 1)
-				// {
-				// 	fr.set_bridged(false);
-				// 	fr.paths.resize(0);
-				// 	continue;
-				// }
+				if(ref_paths_map.size() > 1)
+				{
+					fr.set_bridged(false);
+					fr.paths.resize(0);
+					continue;
+				}
 			}
 		}
 

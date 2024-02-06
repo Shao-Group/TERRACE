@@ -628,6 +628,11 @@ int bundle_bridge::get_more_chimeric()
 			}
 		}
 
+		if(strcmp(fr.h1->qname.c_str(),"simulate:34917")==0)
+		{
+			printf("simulate:34917 left b = %d, right b = %d\n",left_boundary_match,right_boundary_match);
+		}
+
 		if(left_boundary_match == 0 && right_boundary_match == 0) continue;
 
 		if(soft_clip_side == 1 && left_boundary_match == 0) //add to map that this frag left soft clip is invalid
@@ -753,10 +758,10 @@ int bundle_bridge::get_more_chimeric()
 				//int edit = get_edit_distance(new_s,region_seq);
 
 				double similarity = get_Jaccard(new_s,region_seq);
-				/*if(strcmp(fr.h1->qname.c_str(),"ST-E00299:245:HKTJJALXX:6:2107:30563:57952")==0)
+				if(strcmp(fr.h1->qname.c_str(),"simulate:34917")==0)
 				{
-					printf("ST-E00299:245:HKTJJALXX:6:2107:30563:57952 soft len=%d, edit=%d, sim==%lf\n",soft_len,edit,similarity);
-				}*/
+					printf("simulate:34917 effective_len=%d, sim==%lf, read_seq=%s, region_seq=%s, region_rpos=%d\n",effective_len,similarity,new_s.c_str(),region_seq.c_str(),rc.rpos);
+				}
 				
 				if(similarity > min_jaccard)
 				{

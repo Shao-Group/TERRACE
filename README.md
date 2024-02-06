@@ -1,3 +1,6 @@
+[![install with bioconda](https://img.shields.io/badge/install%20with-bioconda-brightgreen.svg?style=flat)](http://bioconda.github.io/recipes/terrace/README.html)
+[![Anaconda-Server Badge](https://anaconda.org/bioconda/terrace/badges/downloads.svg)](https://anaconda.org/bioconda/terrace)
+
 # Introduction
 
 TERRACE is a circRNA assembler for paired-end RNA-seq data.
