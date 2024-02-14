@@ -2,7 +2,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.63])
-AC_INIT(terrace, 1.1.1, tkz5115@psu.edu)
+AC_INIT(terrace, 1.1.2, tkz5115@psu.edu)
 AM_INIT_AUTOMAKE()
 AC_CONFIG_SRCDIR([src/main.cc])
 AC_CONFIG_HEADERS([config.h])
