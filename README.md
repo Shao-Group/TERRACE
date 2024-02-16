@@ -8,9 +8,9 @@ TERRACE is a circRNA assembler for paired-end RNA-seq data.
 # Installation
 
 TERRACE can be easily installed via 
-[(conda)](http://bioconda.github.io/recipes/terrace/README.html).
+[conda](http://bioconda.github.io/recipes/terrace/README.html).
 If you would install it from source code, please follow
-[(INSTALL.md)](https://github.com/Shao-Group/TERRACE/blob/master/INSTALL.md).
+[INSTALL](https://github.com/Shao-Group/TERRACE/blob/master/INSTALL.md).
 
 # Usage
 
