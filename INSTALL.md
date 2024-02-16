@@ -1,6 +1,6 @@
 # Install TERRACE from Source
 
-TERRACE uses additional libraries of Boost and htslib. 
+Download the source code of latest TERRACE from [here](https://github.com/Shao-Group/TERRACE/releases/download/v1.1.2/terrace-1.1.2.tar.gz). TERRACE uses additional libraries of Boost and htslib. 
 If they have not been installed in your system, you first
 need to download and install them. You might also need to
 export the runtime library path to certain environmental
@@ -51,10 +51,6 @@ export LD_LIBRARY_PATH=/path/to/your/htslib/lib:$LD_LIBRARY_PATH
 
 Use the following to compile TERRACE:
 ```
-aclocal
-autoconf
-autoheader
-automake -a
 ./configure --with-htslib=/path/to/your/htslib --with-boost=/path/to/your/boost
 make
 ```
