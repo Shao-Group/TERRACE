@@ -8,17 +8,53 @@ See LICENSE for licensing.
 See LICENSE for licensing.
 */
 
+
+
+/*
+How to build and compile TERRACE?
+1) Go to
+   /home/ugrads/aps7140/workspace/terrace/anubhav-s-terrace
+
+2) Run
+   ./configure --with-htslib=$HOME/workspace/terrace/libs/htslib-1.22/install --with-boost=$HOME/workspace/terrace/libs/boost_1_88_0
+
+3) Run
+   make
+
+
+
+How to run TERRACE with the brain data?
+
+1) Go to 
+   /home/ugrads/aps7140/workspace/terrace/anubhav-s-terrace/brain
+
+2) Run
+   ../src/terrace -i CRR026084_Aligned.sortedByCoord.out.bam -o dummy_831.gtf --read_length 150
+
+
+
+SHORTCUT: Run within the "src" / "brain" folder in "~/workspace/terrace/anubhav-s-terrace-2.0".
+		  alias r="cd ../src && make && cd ../brain && ../src/terrace -i CRR026084_Aligned.sortedByCoord.out.bam -o dummy_831.gtf --read_length 150"
+		  r
+*/
+
+
+
 #include <cassert>
 #include <cstdio>
 #include <map>
 #include <iomanip>
 #include <fstream>
+#include <string>
+using namespace std;
 
 #include "bundle_bridge.h"
 #include "region.h"
 #include "config.h"
 #include "util.h"
 #include "bridger.h"
+
+const int STOP = 10;
 
 bundle_bridge::bundle_bridge(bundle_base &b, reference &r)
 	: bb(b), ref(r)
@@ -102,6 +138,13 @@ int bundle_bridge::build(map <string, int> RO_reads_map, faidx_t *_fai)
 
 	set_hits_RO_parameter(RO_reads_map);
 
+
+
+	assign_orientation_labels();
+	build_outward_reads();
+
+
+
 	build_supplementaries();
 	set_chimeric_cigar_positions(); //setting h.first_pos/second_pos etc for getting back splice positions using cigars 
 	build_junctions();
@@ -173,6 +216,141 @@ int bundle_bridge::build(map <string, int> RO_reads_map, faidx_t *_fai)
 	}*/
 	return 0;
 }
+
+
+
+int bundle_bridge::assign_orientation_labels() {
+	for (int idx = 0; idx < bb.hits.size(); idx++)
+    {
+        hit &h = bb.hits[idx];
+
+        int is_first_read = h.flag & 0x40;
+        int is_second_read = h.flag & 0x80;
+        int is_reverse_strand = h.flag & 0x10;
+        int is_mate_reverse = h.flag & 0x20;
+
+        string lbl = "";
+
+        if (is_first_read >= 1)
+        {
+            if (is_reverse_strand >= 1 && is_mate_reverse < 1) 
+                lbl = "R1F2";
+            else if (is_reverse_strand < 1 && is_mate_reverse >= 1)
+                lbl = "F1R2";
+            else if (is_reverse_strand >= 1 && is_mate_reverse >= 1)
+                lbl = "R1R2";
+            else
+                lbl = "F1F2";
+        }
+		
+        else if (is_second_read >= 1)
+        {
+            if (is_reverse_strand >= 1 && is_mate_reverse < 1)
+                lbl = "R2F1";
+            else if (is_reverse_strand < 1 && is_mate_reverse >= 1)
+                lbl = "F2R1";
+            else if (is_reverse_strand >= 1 && is_mate_reverse >= 1)
+                lbl = "R2R1";
+            else
+                lbl = "F2F1";
+        }
+
+        h.label = lbl;
+	}
+
+	return 0;
+}
+
+
+
+int bundle_bridge::build_outward_reads() {
+	FILE *logfile = fopen("outward_reads.log", "w");
+	if (! logfile)
+		fprintf(stderr, "ERROR: system unable to open log file for writing!\n");
+
+	int max_index = bb.hits.size() + 1;
+	if (max_index > 1000000) max_index = 1000000;
+
+    vector< vector<int> > vv;
+    vv.resize(max_index);
+
+	for (int i = 0; i < bb.hits.size(); i++)
+    {
+        hit &h = bb.hits[i];
+        int k = (h.qhash % max_index + (h.flag & 0x40) + (h.flag & 0x80)) % max_index;
+        vv[k].push_back(i);
+    }
+
+	int count = 0;
+	for (int i = 0; i < bb.hits.size(); i++)
+    {
+        hit &curr = bb.hits[i];
+        int k = (curr.qhash % max_index + (curr.flag & 0x40) + (curr.flag & 0x80)) % max_index;
+
+        for (int j = 0; j < vv[k].size(); j++)
+        {
+            hit &mate = bb.hits[vv[k][j]];
+
+            // skip self
+            if (&curr == &mate)
+				continue;
+
+            // check same read name
+            if (curr.qname != mate.qname)
+				continue;
+
+            // check mate position
+            if (curr.mpos != mate.pos) 
+				continue;
+
+            // check matching orientation label
+            if (curr.label != mate.label)
+				continue;
+
+            int is_proper_pair = curr.flag & 0x2 && mate.flag & 0x2;
+            if (is_proper_pair < 1)
+            {
+                if (curr.label == "R1F2" || curr.label == "R2F1")
+                {
+                    int curr_start_pos = curr.pos;
+                    int curr_end_pos = curr.rpos;
+                    int mate_start_pos = mate.pos;
+                    int mate_end_pos = mate.rpos;
+
+                    bool is_outward = false;
+
+                    // Case 1: this read is forward, mate is reverse
+                    if (curr.label == "R2F1")
+                        is_outward = mate_end_pos < curr_start_pos;
+
+                    // Case 2: this read is reverse, mate is forward
+                    else if (curr.label == "R1F2")
+                        is_outward = curr_end_pos < mate_start_pos;
+
+                    if (is_outward)
+                    {
+                        fprintf(logfile, "%s (%s):%d-%d\n",
+                               curr.qname,
+                               curr.label,
+                               curr_start_pos,
+                               curr_end_pos);
+						count++;
+                    }
+
+					if (count >= STOP) { 
+						fclose(logfile);
+						return 0;
+					}
+                }
+            }
+        }
+    }
+
+	fclose(logfile);
+    return 0;
+}
+
+
 
 int bundle_bridge::set_hits_RO_parameter(map <string, int> RO_reads_map)
 {
@@ -4285,3 +4463,4 @@ vector<int32_t> bundle_bridge::get_splices(fragment &fr)
 	}
 	return vv;
 }
+
