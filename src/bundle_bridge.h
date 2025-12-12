@@ -36,6 +36,7 @@ public:
 	set<string> breads;					// bridged reads
 	vector<fragment> fragments;			// to-be-filled fragments
 	vector<fragment> circ_fragments;	// to-be-filled fragments
+	vector<fragment> outward_fragments;	// to-be-filled fragments
 	faidx_t *fai;						//pointer to fetch fasta seq from region
 
 	vector<pair<fragment,fragment>> circ_fragment_pairs;	//bridged fragment pairs for circular RNA
@@ -70,6 +71,10 @@ public:
 public:
 	int set_hits_RO_parameter(map <string, int> RO_reads_map);
 	int set_chimeric_cigar_positions();
+	int assign_orientation_labels();
+	int assign_orientation_labels2();
+	int build_outward_reads();
+	int build_outward_reads2();
 	int build_supplementaries();
 	int build_junctions();
 	int extend_junctions();

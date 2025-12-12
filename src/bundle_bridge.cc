@@ -16,9 +16,12 @@ How to build and compile TERRACE?
    /home/ugrads/aps7140/workspace/terrace/anubhav-s-terrace
 
 2) Run
-   ./configure --with-htslib=$HOME/workspace/terrace/libs/htslib-1.22/install --with-boost=$HOME/workspace/terrace/libs/boost_1_88_0
+   autoreconf -i
 
 3) Run
+   ./configure --with-htslib=$HOME/workspace/terrace_new/libs/htslib-1.22/install --with-boost=$HOME/workspace/terrace_new/libs/boost_1_88_0
+
+4) Run
    make
 
 
@@ -46,7 +49,6 @@ SHORTCUT: Run within the "src" / "brain" folder in "~/workspace/terrace/anubhav-
 #include <iomanip>
 #include <fstream>
 #include <string>
-using namespace std;
 
 #include "bundle_bridge.h"
 #include "region.h"
@@ -54,7 +56,7 @@ using namespace std;
 #include "util.h"
 #include "bridger.h"
 
-const int STOP = 10;
+const int TOLERANCE_GAP = 120;
 
 bundle_bridge::bundle_bridge(bundle_base &b, reference &r)
 	: bb(b), ref(r)
@@ -141,6 +143,20 @@ int bundle_bridge::build(map <string, int> RO_reads_map, faidx_t *_fai)
 
 
 	assign_orientation_labels();
+
+	for (int idx = 0; idx < bb.hits.size(); idx++)
+	{
+		hit &h = bb.hits[idx];
+		// h.print();
+
+		// if (h.label == "F2R1" || h.label == "F1R2") {
+		// if (h.label == "R2F1") {
+		// if (h.qname == "E00512:127:HJNF3ALXX:3:1112:16275:48810") {
+			// h.print();
+			// printf("Hit %d: name = %s, label = %s\n", idx, h.qname, h.label);
+		// }
+	}
+
 	build_outward_reads();
 
 
@@ -222,7 +238,16 @@ int bundle_bridge::build(map <string, int> RO_reads_map, faidx_t *_fai)
 int bundle_bridge::assign_orientation_labels() {
 	for (int idx = 0; idx < bb.hits.size(); idx++)
     {
-        hit &h = bb.hits[idx];
+		hit &h = bb.hits[idx];
+
+		int is_read_unmapped = h.flag & 0x4;
+		int is_mate_unmapped = h.flag & 0x8;
+
+		if (is_read_unmapped >= 1 || is_mate_unmapped >= 1)
+			continue;
+
+		if (h.tid != h.mtid)  
+            continue;
 
         int is_first_read = h.flag & 0x40;
         int is_second_read = h.flag & 0x80;
@@ -231,39 +256,45 @@ int bundle_bridge::assign_orientation_labels() {
 
         string lbl = "";
 
-        if (is_first_read >= 1)
-        {
-            if (is_reverse_strand >= 1 && is_mate_reverse < 1) 
-                lbl = "R1F2";
-            else if (is_reverse_strand < 1 && is_mate_reverse >= 1)
-                lbl = "F1R2";
-            else if (is_reverse_strand >= 1 && is_mate_reverse >= 1)
-                lbl = "R1R2";
-            else
-                lbl = "F1F2";
-        }
-		
-        else if (is_second_read >= 1)
-        {
-            if (is_reverse_strand >= 1 && is_mate_reverse < 1)
-                lbl = "R2F1";
-            else if (is_reverse_strand < 1 && is_mate_reverse >= 1)
-                lbl = "F2R1";
-            else if (is_reverse_strand >= 1 && is_mate_reverse >= 1)
-                lbl = "R2R1";
-            else
-                lbl = "F2F1";
-        }
+		if (is_first_read >= 1)
+		{
+			if (is_reverse_strand >= 1 && is_mate_reverse < 1) 
+				lbl = "F2R1";
+			else if (is_reverse_strand < 1 && is_mate_reverse >= 1)
+				lbl = "F1R2";
+		}
 
-        h.label = lbl;
+		else if (is_second_read >= 1)
+		{
+			if (is_reverse_strand >= 1 && is_mate_reverse < 1)
+				lbl = "F1R2";
+			else if (is_reverse_strand < 1 && is_mate_reverse >= 1)
+				lbl = "F2R1";
+		}
+
+		h.label = lbl;
 	}
 
 	return 0;
 }
 
 
-int bundle_bridge::build_outward_reads2()
+
+int bundle_bridge::build_outward_reads()
 {
+	char filename[64];
+	snprintf(filename, sizeof(filename), "outwards_fragments_%d.txt", TOLERANCE_GAP);
+	FILE *fragments_logfile = fopen(filename, "a");
+	if (! fragments_logfile)
+		fprintf(stderr, "ERROR: system unable to open log file for writing\n");
+
+	std::vector<fragment> outward_fragments;
+
+	/*
+	FILE *logfile = fopen(filename, "a");
+	if (! logfile)
+		fprintf(stderr, "ERROR: system unable to open log file for writing\n");
+	*/
 
 	int ctp = 0;// count fragments number from paired-end reads
 	int ctu = 0;// count fragments number from UMI
@@ -294,12 +325,6 @@ int bundle_bridge::build_outward_reads2()
 		// do not use hi; as long as qname, pos and isize are identical
 		int k = (h.qhash % max_index + h.pos % max_index) % max_index;
 
-		/*
-		SI si(h.qname, h.hi);
-		MSI &m = vv[k];
-		assert(m.find(si) == m.end());
-		m.insert(PSI(si, i));
-		*/
 		vv[k].push_back(i); //vv containes hits of the same hash
 	}
 
@@ -314,23 +339,6 @@ int bundle_bridge::build_outward_reads2()
 		if(h.pos >= h.mpos) continue;
 
 		int k = (h.qhash % max_index + h.mpos % max_index) % max_index;
-
-		/*
-		h.print();
-		for(int j = 0; j < vv[k].size(); j++)
-		{
-			hit &z = bb.hits[vv[k][j]];
-			printf(" ");
-			z.print();
-		}
-		*/
-
-		/*if(strcmp(h.qname.c_str(),"simulate:311116") == 0)
-		{
-			printf("simulate:311116 is in hits\n");
-			printf("isize: %d\n",h.isize);
-			printf("vlist size: %zu\n",h.vlist.size());
-		}*/
 
 		int x = -1;
 		for(int j = 0; j < vv[k].size(); j++)
@@ -365,15 +373,115 @@ int bundle_bridge::build_outward_reads2()
 		if(x == -1) continue;
 		//if(bb.hits[x].vlist.size() == 0) continue;
 
-		// now we have two hits from the same fragment (paire-end reads)
+		// now we have two hits from the same fragment (paired-end reads)
 		// bb.hits[i] and bb.hits[x]
 		// now it is time to check orientations
 
+		bool is_outward = false;
+
+		hit curr;
+		hit mate;
+
+		if ( (bb.hits[i].flag & 0x40) && (bb.hits[x].flag & 0x80) )
+		{
+			curr = bb.hits[i];
+			mate = bb.hits[x];
+		} 
+		
+		else if ( (bb.hits[x].flag & 0x40) && (bb.hits[i].flag & 0x80) )
+		{
+			curr = bb.hits[x];
+			mate = bb.hits[i];
+		}
+
+		// skip self
+		if (&curr == &mate) {
+			// printf("1\n");
+			continue;
+		}
+
+		// check same read name
+		if (curr.qname != mate.qname) {
+			// printf("2\n");
+			continue;
+		}
+
+		// check mate position
+		if (curr.mpos != mate.pos) {
+			// printf("3\n");
+			continue;
+		}
+
+		int curr_start_pos = curr.pos;
+		int curr_end_pos = curr.rpos;
+		int mate_start_pos = mate.pos;
+		int mate_end_pos = mate.rpos;
+
+		if (curr.label == "F1R2")
+		{
+			/*
+			// MARKER!!!
+			if (mate.qname == "E00512:127:HJNF3ALXX:3:1112:16275:48810") {
+				printf("Mate:\t%s\t%s\t (%d - %d)\n", mate.qname.c_str(), mate.label.c_str(), mate_start_pos, mate_end_pos);
+				printf("Current:\t%s\t%s\t (%d - %d)\n", curr.qname.c_str(), curr.label.c_str(), curr_start_pos, curr_end_pos);
+
+				Mate:   E00512:127:HJNF3ALXX:3:1112:16275:48810 F1R2     (743953 - 745546)
+				Current:        E00512:127:HJNF3ALXX:3:1112:16275:48810 F1R2     (164301 - 164451)
+
+				current should be the 700 read!!!
+			}
+			*/
+
+			// if ( (mate_start_pos < curr_start_pos) && (mate_end_pos < curr_end_pos) )
+			if ( (mate_start_pos + TOLERANCE_GAP < curr_start_pos) && (mate_end_pos + TOLERANCE_GAP < curr_end_pos) )
+			{
+				is_outward = true;
+
+				/*
+				fprintf(logfile, "%s\t%s\t%s\t%d-%d\n",
+							bb.chrm.c_str(),
+							curr.qname.c_str(),
+							curr.label.c_str(),
+							curr_start_pos,
+							curr_end_pos);
+				*/
+			}
+		}
+
+		else if (curr.label == "F2R1")
+		{
+			// if ( (curr_start_pos < mate_start_pos) && (curr_end_pos < mate_end_pos) )
+			if ( (curr_start_pos + TOLERANCE_GAP < mate_start_pos) && (curr_end_pos + TOLERANCE_GAP < mate_end_pos) )
+			{	
+				is_outward = true;
+
+				/*
+				fprintf(logfile, "%s\t%s\t%s\t%d-%d\n",
+							bb.chrm.c_str(),
+							curr.qname.c_str(),
+							curr.label.c_str(),
+							curr_start_pos,
+							curr_end_pos);
+				*/
+			}
+		}
+
 		// if( you think they are outward-reads): print something and/or
 		// otherwise continue
+
+		if (is_outward)
+		{
+			fragment fr(&bb.hits[i], &bb.hits[x]);
+			outward_fragments.push_back(fr);
+		}
 		
 		// print something 
 		continue;
+
+
+
+
+
 
 		fragment fr(&bb.hits[i], &bb.hits[x]); //h2 and h1s as param or h2s and h1 as parameter
 
@@ -445,6 +553,33 @@ int bundle_bridge::build_outward_reads2()
 
 	}
 
+
+
+
+
+	
+	for (int idx = 0; idx < outward_fragments.size(); idx++)
+	{
+		const fragment &fr = outward_fragments[idx];
+		fprintf(fragments_logfile,
+			"Hit 1 (%s): %s\t\t%d-%d\t\t\tHit 2 (%s): %s\t\t%d-%d\n",
+			bb.chrm.c_str(),
+			fr.h1->qname.c_str(),
+			fr.h1->pos, fr.h1->rpos,
+			bb.chrm.c_str(),
+			fr.h2->qname.c_str(),
+			fr.h2->pos, fr.h2->rpos
+		);
+	}
+
+	fclose(fragments_logfile);
+	// fclose(logfile);
+
+
+
+
+
+
 	//printf("total bb.hits = %lu, total fragments = %lu\n", bb.hits.size(), fragments.size());
 	
 	/*for(int k = 0; k < fragments.size(); k++)
@@ -457,96 +592,13 @@ int bundle_bridge::build_outward_reads2()
 	}*/
 
 	// by shao, exit here (no UMI)
+
+
+
+
+
+
 	return 0;
-}
-
-
-
-int bundle_bridge::build_outward_reads() {
-	FILE *logfile = fopen("outward_reads.log", "w");
-	if (! logfile)
-		fprintf(stderr, "ERROR: system unable to open log file for writing!\n");
-
-	int max_index = bb.hits.size() + 1;
-	if (max_index > 1000000) max_index = 1000000;
-
-    vector< vector<int> > vv;
-    vv.resize(max_index);
-
-	for (int i = 0; i < bb.hits.size(); i++)
-    {
-        hit &h = bb.hits[i];
-        int k = (h.qhash % max_index + (h.flag & 0x40) + (h.flag & 0x80)) % max_index;
-        vv[k].push_back(i);
-    }
-
-	int count = 0;
-	for (int i = 0; i < bb.hits.size(); i++)
-    {
-        hit &curr = bb.hits[i];
-        int k = (curr.qhash % max_index + (curr.flag & 0x40) + (curr.flag & 0x80)) % max_index;
-
-        for (int j = 0; j < vv[k].size(); j++)
-        {
-            hit &mate = bb.hits[vv[k][j]];
-
-            // skip self
-            if (&curr == &mate)
-				continue;
-
-            // check same read name
-            if (curr.qname != mate.qname)
-				continue;
-
-            // check mate position
-            if (curr.mpos != mate.pos) 
-				continue;
-
-            // check matching orientation label
-            if (curr.label != mate.label)
-				continue;
-
-            int is_proper_pair = curr.flag & 0x2 && mate.flag & 0x2;
-            if (is_proper_pair < 1)
-            {
-                if (curr.label == "R1F2" || curr.label == "R2F1")
-                {
-                    int curr_start_pos = curr.pos;
-                    int curr_end_pos = curr.rpos;
-                    int mate_start_pos = mate.pos;
-                    int mate_end_pos = mate.rpos;
-
-                    bool is_outward = false;
-
-                    // Case 1: this read is forward, mate is reverse
-                    if (curr.label == "R2F1")
-                        is_outward = mate_end_pos < curr_start_pos;
-
-                    // Case 2: this read is reverse, mate is forward
-                    else if (curr.label == "R1F2")
-                        is_outward = curr_end_pos < mate_start_pos;
-
-                    if (is_outward)
-                    {
-                        fprintf(logfile, "%s (%s):%d-%d\n",
-                               curr.qname,
-                               curr.label,
-                               curr_start_pos,
-                               curr_end_pos);
-						count++;
-                    }
-
-					if (count >= STOP) { 
-						fclose(logfile);
-						return 0;
-					}
-                }
-            }
-        }
-    }
-
-	fclose(logfile);
-    return 0;
 }
 
 
@@ -4663,3 +4715,174 @@ vector<int32_t> bundle_bridge::get_splices(fragment &fr)
 	return vv;
 }
 
+/*
+UNUSED CODE FROM PREVIOUS VERSIONS:
+
+int bundle_bridge::assign_orientation_labels() {
+	for (int idx = 0; idx < bb.hits.size(); idx++)
+    {
+		hit &h = bb.hits[idx];
+
+		int is_read_unmapped = h.flag & 0x4;
+		int is_mate_unmapped = h.flag & 0x8;
+
+		if (is_read_unmapped >= 1 || is_mate_unmapped >= 1)
+			continue;
+
+		if (h.tid != h.mtid)  
+            continue;
+
+		int is_proper_pair = h.flag & 0x2;
+        int is_first_read = h.flag & 0x40;
+        int is_second_read = h.flag & 0x80;
+        int is_reverse_strand = h.flag & 0x10;
+        int is_mate_reverse = h.flag & 0x20;
+
+        string lbl = "";
+
+		// normal case for grey-colored reads
+		if (is_proper_pair >= 1)
+		{
+			if (is_first_read >= 1)
+			{
+				if (is_reverse_strand >= 1 && is_mate_reverse < 1) 
+					lbl = "F2R1";
+				else if (is_reverse_strand < 1 && is_mate_reverse >= 1)
+					lbl = "F1R2";
+			}
+
+			else if (is_second_read >= 1)
+			{
+				if (is_reverse_strand >= 1 && is_mate_reverse < 1)
+					lbl = "F1R2";
+				else if (is_reverse_strand < 1 && is_mate_reverse >= 1)
+					lbl = "F2R1";
+			}
+		}
+
+		// green-colored reads, hinting outward reads
+		else
+		{
+			if (is_first_read >= 1) 
+			{
+				if (is_reverse_strand >= 1 && is_mate_reverse < 1) 
+					lbl = "R1F2";
+				// else if (is_reverse_strand < 1 && is_mate_reverse >= 1)
+					// lbl = "F1R2";
+				// else if (is_reverse_strand >= 1 && is_mate_reverse >= 1)
+					// lbl = "R1R2";
+				// else
+					// lbl = "F1F2";
+			}
+			
+			else if (is_second_read >= 1)
+			{
+				if (is_reverse_strand >= 1 && is_mate_reverse < 1)
+					lbl = "R2F1";
+				// else if (is_reverse_strand < 1 && is_mate_reverse >= 1)
+					// lbl = "F2R1";
+				// else if (is_reverse_strand >= 1 && is_mate_reverse >= 1)
+					// lbl = "R2R1";
+				// else
+					// lbl = "F2F1";
+			}
+		}
+
+		h.label = lbl;
+	}
+
+	return 0;
+}
+
+
+
+int bundle_bridge::build_outward_reads() {
+	FILE *logfile = fopen("outward_reads.txt", "w");
+	if (! logfile)
+		fprintf(stderr, "ERROR: system unable to open log file for writing!\n");
+
+	int max_index = bb.hits.size() + 1;
+	if (max_index > 1000000) max_index = 1000000;
+
+    vector< vector<int> > vv;
+    vv.resize(max_index);
+
+	for (int i = 0; i < bb.hits.size(); i++)
+    {
+        hit &h = bb.hits[i];
+        int k = (h.qhash % max_index + (h.flag & 0x40) + (h.flag & 0x80)) % max_index;
+        vv[k].push_back(i);
+    }
+
+	int count = 0;
+	for (int i = 0; i < bb.hits.size(); i++)
+    {
+        hit &curr = bb.hits[i];
+        int k = (curr.qhash % max_index + (curr.flag & 0x40) + (curr.flag & 0x80)) % max_index;
+
+        for (int j = 0; j < vv[k].size(); j++)
+        {
+            hit &mate = bb.hits[vv[k][j]];
+
+            // skip self
+            if (&curr == &mate) {
+				// printf("1\n");
+				continue;
+			}
+
+            // check same read name
+            if (curr.qname != mate.qname) {
+				// printf("2\n");
+				continue;
+			}
+
+            // check mate position
+            if (curr.mpos != mate.pos) {
+				// printf("3\n");
+				continue;
+			}
+
+			// check matching orientation label
+            // if (curr.label != mate.label) {
+				// printf("4\n");
+				// continue;
+			// }
+
+			if (curr.label == "R2F1" || curr.label == "R1F2")
+			{
+				int curr_start_pos = curr.pos;
+				int curr_end_pos = curr.rpos;
+				int mate_start_pos = mate.pos;
+				int mate_end_pos = mate.rpos;
+
+				bool is_outward = false;
+
+				// Case 1: this read is forward, mate is reverse
+				if (curr.label == "R2F1") {
+					printf("R2F1: %d < %d\n", mate_end_pos, curr_start_pos);
+					is_outward = mate_end_pos < curr_start_pos;
+				}
+
+				// Case 2: this read is reverse, mate is forward
+				else if (curr.label == "R1F2") {
+					printf("R1F2: %d < %d\n", curr_end_pos, mate_start_pos);
+					is_outward = curr_end_pos < mate_start_pos;
+				}
+
+				if (is_outward)
+				{
+					fprintf(logfile, "%s (%s):%d-%d\n",
+							curr.qname,
+							curr.label,
+							curr_start_pos,
+							curr_end_pos);
+					count++;
+				}
+			}
+        }
+    }
+
+	fclose(logfile);
+    return 0;
+}
+*/
