@@ -72,9 +72,7 @@ public:
 	int set_hits_RO_parameter(map <string, int> RO_reads_map);
 	int set_chimeric_cigar_positions();
 	int assign_orientation_labels();
-	int assign_orientation_labels2();
-	int build_outward_reads();
-	int build_outward_reads2();
+	int build_outward_fragments();
 	int build_supplementaries();
 	int build_junctions();
 	int extend_junctions();

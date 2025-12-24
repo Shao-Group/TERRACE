@@ -154,6 +154,70 @@ int bridger::bridge_circ_fragments()
 	return 0;
 }
 
+int bridger::bridge_outward_fragments()
+{
+	/*
+	printf("before bridging ... \n");
+	for(int i = 0; i < bd->outward_fragments.size(); i++)
+	{
+		bd->outward_fragments[i].print(i);
+	}
+	printf("===\n");
+	*/
+
+	set_normal_length();
+	int n = bd->outward_fragments.size();
+
+	bridge_overlapped_fragments(bd->outward_fragments);
+	filter_paths(bd->outward_fragments);
+	int n1 = get_paired_fragments(bd->outward_fragments);
+
+	vector<fcluster> open_fclusters;
+	cluster_open_fragments(open_fclusters, bd->outward_fragments);
+
+	// 1st round of briding hard fragments
+	build_junction_graph(bd->outward_fragments);
+	bridge_hard_fragments_normal(open_fclusters);
+	filter_paths(bd->outward_fragments);
+	int n2 = get_paired_fragments(bd->outward_fragments);
+
+	// 2nd round of briding hard fragments
+	build_junction_graph(bd->outward_fragments);
+	bridge_hard_fragments_normal(open_fclusters);
+	filter_paths(bd->outward_fragments);
+	int n3 = get_paired_fragments(bd->outward_fragments);
+
+	// recluster open fragments
+	open_fclusters.clear();
+	cluster_open_fragments(open_fclusters, bd->outward_fragments);
+	bridge_phased_fragments(open_fclusters);
+	filter_paths(bd->outward_fragments);
+	int n4 = get_paired_fragments(bd->outward_fragments);
+
+	double r1 = n1 * 100.0 / n;
+	double r2 = n2 * 100.0 / n;
+	double r3 = n3 * 100.0 / n;
+	double r4 = n4 * 100.0 / n;
+
+	vector<int> ct = get_bridged_fragments_type(bd->outward_fragments);	// ct<ct1, ct2, ct3> paired-end, UMI-linked, both
+	if(verbose >= 1)
+	{
+		printf("#normal fragments = %d, #fixed = %d -> %d -> %d -> %d, ratio = %.2lf -> %.2lf -> %.2lf -> %.2lf, #remain = %d, length = (%d, %d, %d), total paired-end = %d, UMI-linked only = %d, intersection: %d, bridged paired-end = %d, UMI-linked only = %d, intersection: %d\n", 
+				n, n1, n2, n3, n4, r1, r2, r3, r4, n - n4, length_low, length_median, length_high, ct[3], ct[4], ct[5], ct[0], ct[1], ct[2]);
+	}
+
+	/*
+	printf("after bridging ... \n");
+	for(int i = 0; i < bd->outward_fragments.size(); i++)
+	{
+		bd->outward_fragments[i].print(i);
+	}
+	printf("===\n");
+	*/
+
+	return 0;
+}
+
 int bridger::bridge_clip(int32_t p1, int32_t p2, circular_transcript &circ)
 {
 	// locate the regions for p1 and p2

@@ -50,6 +50,7 @@ public:
 public:
 	int bridge_normal_fragments();
 	int bridge_circ_fragments();
+	int bridge_outward_fragments();
 	int bridge_clip(int32_t p1, int32_t p2, circular_transcript &circ);
 	int pick_bridge_path(vector<fragment> &frags);
 	int print(vector<fragment> &frags);

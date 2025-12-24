@@ -1,3 +1,5 @@
+// export LD_LIBRARY_PATH=$HOME/workspace/terrace_new/libs/htslib-1.22/install/lib:$LD_LIBRARY_PATH
+
 /*
 Part of Coral
 (c) 2019 by Mingfu Shao, The Pennsylvania State University.
@@ -56,7 +58,7 @@ SHORTCUT: Run within the "src" / "brain" folder in "~/workspace/terrace/anubhav-
 #include "util.h"
 #include "bridger.h"
 
-const int TOLERANCE_GAP = 120;
+const int TOLERANCE_GAP = 0;
 
 bundle_bridge::bundle_bridge(bundle_base &b, reference &r)
 	: bb(b), ref(r)
@@ -140,27 +142,8 @@ int bundle_bridge::build(map <string, int> RO_reads_map, faidx_t *_fai)
 
 	set_hits_RO_parameter(RO_reads_map);
 
-
-
 	assign_orientation_labels();
-
-	for (int idx = 0; idx < bb.hits.size(); idx++)
-	{
-		hit &h = bb.hits[idx];
-		// h.print();
-
-		// if (h.label == "F2R1" || h.label == "F1R2") {
-		// if (h.label == "R2F1") {
-		// if (h.qname == "E00512:127:HJNF3ALXX:3:1112:16275:48810") {
-			// h.print();
-			// printf("Hit %d: name = %s, label = %s\n", idx, h.qname, h.label);
-		// }
-	}
-
-	build_outward_reads();
-
-
-
+	build_outward_fragments();
 	build_supplementaries();
 	set_chimeric_cigar_positions(); //setting h.first_pos/second_pos etc for getting back splice positions using cigars 
 	build_junctions();
@@ -211,6 +194,7 @@ int bundle_bridge::build(map <string, int> RO_reads_map, faidx_t *_fai)
 	bridger bdg(this);
 	bdg.bridge_normal_fragments();
 	bdg.bridge_circ_fragments();
+	bdg.bridge_outward_fragments();
 
 	//extract_RO_circRNA();
 	//extract_HS_frags_circRNA();
@@ -280,7 +264,7 @@ int bundle_bridge::assign_orientation_labels() {
 
 
 
-int bundle_bridge::build_outward_reads()
+int bundle_bridge::build_outward_fragments()
 {
 	char filename[64];
 	snprintf(filename, sizeof(filename), "outwards_fragments_%d.txt", TOLERANCE_GAP);
@@ -290,70 +274,51 @@ int bundle_bridge::build_outward_reads()
 
 	std::vector<fragment> outward_fragments;
 
-	/*
-	FILE *logfile = fopen(filename, "a");
-	if (! logfile)
-		fprintf(stderr, "ERROR: system unable to open log file for writing\n");
-	*/
-
-	int ctp = 0;// count fragments number from paired-end reads
-	int ctu = 0;// count fragments number from UMI
-	int ctb = 0;// count fragments number for both
+	int ctp = 0; // count fragments number from paired-end reads
+	int ctu = 0; // count fragments number from UMI
+	int ctb = 0; // count fragments number for both
 
 	// TODO: parameters
 	int32_t max_misalignment1 = 20;
 	int32_t max_misalignment2 = 10;
 
-	fragments.clear();
-	if(bb.hits.size() == 0) return 0;
+	outward_fragments.clear();
+	if (bb.hits.size() == 0) return 0;
 
 	int max_index = bb.hits.size() + 1;
-	if(max_index > 1000000) max_index = 1000000;
+	if (max_index > 1000000) max_index = 1000000;
 
 	vector< vector<int> > vv;
-	vv.resize(max_index); //max_index slots initialized to zero, here max_index is the max hash index
+	vv.resize(max_index); // max_index slots initialized to zero, here max_index is the max hash index
 
 	// first build index
-	for(int i = 0; i < bb.hits.size(); i++)
+	for (int i = 0; i < bb.hits.size(); i++)
 	{
 		hit &h = bb.hits[i];
-
-		// comment out for outward reads
-		//if(h.isize >= 0) continue;
-		//if(h.vlist.size() == 0) continue;
 
 		// do not use hi; as long as qname, pos and isize are identical
 		int k = (h.qhash % max_index + h.pos % max_index) % max_index;
 
-		vv[k].push_back(i); //vv containes hits of the same hash
+		vv[k].push_back(i); // vv containes hits of the same hash
 	}
 
-	for(int i = 0; i < bb.hits.size(); i++)
+	for (int i = 0; i < bb.hits.size(); i++)
 	{
 		hit &h = bb.hits[i];
 
 		if(h.paired == true) continue;
-		//if(h.isize <= 0) continue;
-		//if(h.vlist.size() == 0) continue;
 
 		if(h.pos >= h.mpos) continue;
 
 		int k = (h.qhash % max_index + h.mpos % max_index) % max_index;
 
 		int x = -1;
-		for(int j = 0; j < vv[k].size(); j++)
+		for (int j = 0; j < vv[k].size(); j++)
 		{
 			hit &z = bb.hits[vv[k][j]];
 
-			/*if(strcmp(z.qname.c_str(),"simulate:311116") == 0)
-			{
-				printf("simulate:311116 is in hits\n");
-			}*/
-
-			//if(z.hi != h.hi) continue;
 			if(z.paired == true) continue;
 			if(z.pos != h.mpos) continue;
-			//if(z.isize + h.isize != 0) continue;
 			if(z.qhash != h.qhash) continue;
 			if(z.qname != h.qname) continue;
 
@@ -361,17 +326,7 @@ int bundle_bridge::build_outward_reads()
 			break;
 		}
 
-		/*
-		SI si(h.qname, h.hi);
-		MSI::iterator it = vv[k].find(si);
-		if(it == vv[k].end()) continue;
-		int x = it->second;
-		*/
-
-		//printf("HIT: i = %d, x = %d, bb.hits[i].vlist = %lu | ", i, x, bb.hits[i].vlist.size(), bb.hits[i].qname.c_str()); bb.hits[i].print();
-
-		if(x == -1) continue;
-		//if(bb.hits[x].vlist.size() == 0) continue;
+		if (x == -1) continue;
 
 		// now we have two hits from the same fragment (paired-end reads)
 		// bb.hits[i] and bb.hits[x]
@@ -379,8 +334,8 @@ int bundle_bridge::build_outward_reads()
 
 		bool is_outward = false;
 
-		hit curr;
-		hit mate;
+		hit &curr = bb.hits[i];
+		hit &mate = bb.hits[x];
 
 		if ( (bb.hits[i].flag & 0x40) && (bb.hits[x].flag & 0x80) )
 		{
@@ -396,19 +351,16 @@ int bundle_bridge::build_outward_reads()
 
 		// skip self
 		if (&curr == &mate) {
-			// printf("1\n");
 			continue;
 		}
 
 		// check same read name
 		if (curr.qname != mate.qname) {
-			// printf("2\n");
 			continue;
 		}
 
 		// check mate position
 		if (curr.mpos != mate.pos) {
-			// printf("3\n");
 			continue;
 		}
 
@@ -419,184 +371,43 @@ int bundle_bridge::build_outward_reads()
 
 		if (curr.label == "F1R2")
 		{
-			/*
-			// MARKER!!!
-			if (mate.qname == "E00512:127:HJNF3ALXX:3:1112:16275:48810") {
-				printf("Mate:\t%s\t%s\t (%d - %d)\n", mate.qname.c_str(), mate.label.c_str(), mate_start_pos, mate_end_pos);
-				printf("Current:\t%s\t%s\t (%d - %d)\n", curr.qname.c_str(), curr.label.c_str(), curr_start_pos, curr_end_pos);
-
-				Mate:   E00512:127:HJNF3ALXX:3:1112:16275:48810 F1R2     (743953 - 745546)
-				Current:        E00512:127:HJNF3ALXX:3:1112:16275:48810 F1R2     (164301 - 164451)
-
-				current should be the 700 read!!!
-			}
-			*/
-
-			// if ( (mate_start_pos < curr_start_pos) && (mate_end_pos < curr_end_pos) )
 			if ( (mate_start_pos + TOLERANCE_GAP < curr_start_pos) && (mate_end_pos + TOLERANCE_GAP < curr_end_pos) )
 			{
 				is_outward = true;
-
-				/*
-				fprintf(logfile, "%s\t%s\t%s\t%d-%d\n",
-							bb.chrm.c_str(),
-							curr.qname.c_str(),
-							curr.label.c_str(),
-							curr_start_pos,
-							curr_end_pos);
-				*/
 			}
 		}
 
 		else if (curr.label == "F2R1")
 		{
-			// if ( (curr_start_pos < mate_start_pos) && (curr_end_pos < mate_end_pos) )
 			if ( (curr_start_pos + TOLERANCE_GAP < mate_start_pos) && (curr_end_pos + TOLERANCE_GAP < mate_end_pos) )
 			{	
 				is_outward = true;
-
-				/*
-				fprintf(logfile, "%s\t%s\t%s\t%d-%d\n",
-							bb.chrm.c_str(),
-							curr.qname.c_str(),
-							curr.label.c_str(),
-							curr_start_pos,
-							curr_end_pos);
-				*/
 			}
 		}
-
-		// if( you think they are outward-reads): print something and/or
-		// otherwise continue
 
 		if (is_outward)
 		{
 			fragment fr(&bb.hits[i], &bb.hits[x]);
 			outward_fragments.push_back(fr);
+			bb.hits[i].paired = true;
+			bb.hits[x].paired = true;
 		}
-		
-		// print something 
-		continue;
-
-
-
-
-
-
-		fragment fr(&bb.hits[i], &bb.hits[x]); //h2 and h1s as param or h2s and h1 as parameter
-
-		/*if(strcmp(fr.h1->qname.c_str(),"simulate:311116") == 0)
-		{
-			printf("simulate:311116 is in fragments\n");
-		}*/
-
-
-		//keep it
-		// ===============================
-		// TODO: dit for UMI
-		bb.hits[i].pi = x; //index of other hit of a fragment stored, i-x are fragment pair indices, partner index
-		bb.hits[x].pi = i;
-		bb.hits[i].fidx = fragments.size();//check if used somewhere
-		bb.hits[x].fidx = fragments.size();//fidx is the fragment index
-		ctp += 1;
-		fr.type = 0; 
-
-		/*
-		// shao: moved to a separate function
-		// and do it later (after remove-tiny-boundary)
-
-		fr.lpos = h.pos;
-		fr.rpos = bb.hits[x].rpos;
-
-		vector<int> v1 = decode_vlist(bb.hits[i].vlist);
-		vector<int> v2 = decode_vlist(bb.hits[x].vlist);
-		fr.k1l = fr.h1->pos - regions[v1.front()].lpos;
-		fr.k1r = regions[v1.back()].rpos - fr.h1->rpos;
-		fr.k2l = fr.h2->pos - regions[v2.front()].lpos;
-		fr.k2r = regions[v2.back()].rpos - fr.h2->rpos;
-		//keep it
-
-		//inlcude
-		fr.b1 = true;
-		if(v1.size() <= 1) 
-		{
-			fr.b1 = false;
-		}
-		else if(v1.size() >= 2 && v1[v1.size() - 2] == v1.back() - 1)
-		{
-			if(fr.h1->rpos - regions[v1.back()].lpos > max_misalignment1 + fr.h1->nm) fr.b1 = false;
-		}
-		else if(v1.size() >= 2 && v1[v1.size() - 2] != v1.back() - 1)
-		{
-			if(fr.h1->rpos - regions[v1.back()].lpos > max_misalignment2 + fr.h1->nm) fr.b1 = false;
-		}
-
-		fr.b2 = true;
-		if(v2.size() <= 1)
-		{
-			fr.b2 = false;
-		}
-		else if(v2.size() >= 2 || v2[1] == v2.front() + 1)
-		{
-			if(regions[v2.front()].rpos - fr.h2->pos > max_misalignment1 + fr.h2->nm) fr.b2 = false;
-		}
-		else if(v2.size() >= 2 || v2[1] != v2.front() + 1)
-		{
-			if(regions[v2.front()].rpos - fr.h2->pos > max_misalignment2 + fr.h2->nm) fr.b2 = false;
-		}
-		*/
-
-		fragments.push_back(fr);
-
-		bb.hits[i].paired = true;
-		bb.hits[x].paired = true;
-
 	}
 
-
-
-
-
-	
 	for (int idx = 0; idx < outward_fragments.size(); idx++)
 	{
 		const fragment &fr = outward_fragments[idx];
+
 		fprintf(fragments_logfile,
-			"Hit 1 (%s): %s\t\t%d-%d\t\t\tHit 2 (%s): %s\t\t%d-%d\n",
+			"%s\t%s\t\t%d – %d\t\t\t%d – %d\n",
 			bb.chrm.c_str(),
 			fr.h1->qname.c_str(),
 			fr.h1->pos, fr.h1->rpos,
-			bb.chrm.c_str(),
-			fr.h2->qname.c_str(),
 			fr.h2->pos, fr.h2->rpos
 		);
 	}
 
 	fclose(fragments_logfile);
-	// fclose(logfile);
-
-
-
-
-
-
-	//printf("total bb.hits = %lu, total fragments = %lu\n", bb.hits.size(), fragments.size());
-	
-	/*for(int k = 0; k < fragments.size(); k++)
-	{
-		fragment &fr = fragments[k];
-		if(strcmp(fr.h1->qname.c_str(),"simulate:311116") == 0)
-		{
-			printf("simulate:311116 is in build_fragments\n");
-		}
-	}*/
-
-	// by shao, exit here (no UMI)
-
-
-
-
-
 
 	return 0;
 }
