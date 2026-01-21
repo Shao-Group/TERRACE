@@ -21,7 +21,7 @@ How to build and compile TERRACE?
    autoreconf -i
 
 3) Run
-   ./configure --with-htslib=$HOME/workspace/terrace_new/libs/htslib-1.22/install --with-boost=$HOME/workspace/terrace_new/libs/boost_1_88_0
+   ./configure --with-htslib=/opt/homebrew/opt/htslib --with-boost=/opt/homebrew/opt/boost/include
 
 4) Run
    make
@@ -65,6 +65,7 @@ bundle_bridge::bundle_bridge(bundle_base &b, reference &r)
 {
 	circ_trsts.clear(); // emptying before storing circRNAs
 	circ_trsts_HS.clear();
+	outward_fragments.clear();
 	circ_fragments.clear();
 	RO_count = 0;
 	total_frag_count = 0;
@@ -82,6 +83,7 @@ bundle_bridge::bundle_bridge(bundle_base &b, reference &r, map <string, int> RO_
 {
 	circ_trsts.clear(); // emptying before storing circRNAs
 	circ_trsts_HS.clear();
+	outward_fragments.clear();
 	circ_fragments.clear();
 	RO_count = 0;
 	total_frag_count = 0;
@@ -272,7 +274,8 @@ int bundle_bridge::build_outward_fragments()
 	if (! fragments_logfile)
 		fprintf(stderr, "ERROR: system unable to open log file for writing\n");
 
-	std::vector<fragment> outward_fragments;
+	// std::vector<fragment> outward_fragments;
+	outward_fragments.clear();
 
 	int ctp = 0; // count fragments number from paired-end reads
 	int ctu = 0; // count fragments number from UMI
@@ -282,7 +285,6 @@ int bundle_bridge::build_outward_fragments()
 	int32_t max_misalignment1 = 20;
 	int32_t max_misalignment2 = 10;
 
-	outward_fragments.clear();
 	if (bb.hits.size() == 0) return 0;
 
 	int max_index = bb.hits.size() + 1;
@@ -331,56 +333,57 @@ int bundle_bridge::build_outward_fragments()
 		// now we have two hits from the same fragment (paired-end reads)
 		// bb.hits[i] and bb.hits[x]
 		// now it is time to check orientations
-
-		bool is_outward = false;
-
-		hit &curr = bb.hits[i];
-		hit &mate = bb.hits[x];
+		
+		hit *curr = nullptr;
+		hit *mate = nullptr;
 
 		if ( (bb.hits[i].flag & 0x40) && (bb.hits[x].flag & 0x80) )
 		{
-			curr = bb.hits[i];
-			mate = bb.hits[x];
-		} 
-		
+			curr = &bb.hits[i];
+			mate = &bb.hits[x];
+		}
 		else if ( (bb.hits[x].flag & 0x40) && (bb.hits[i].flag & 0x80) )
 		{
-			curr = bb.hits[x];
-			mate = bb.hits[i];
+			curr = &bb.hits[x];
+			mate = &bb.hits[i];
+		}
+		else
+		{
+			continue;
 		}
 
 		// skip self
-		if (&curr == &mate) {
+		if (curr == mate) {
 			continue;
 		}
 
 		// check same read name
-		if (curr.qname != mate.qname) {
+		if (curr->qname != mate->qname) {
 			continue;
 		}
 
 		// check mate position
-		if (curr.mpos != mate.pos) {
+		if (curr->mpos != mate->pos) {
 			continue;
 		}
 
-		int curr_start_pos = curr.pos;
-		int curr_end_pos = curr.rpos;
-		int mate_start_pos = mate.pos;
-		int mate_end_pos = mate.rpos;
+		bool is_outward = false;
+		int curr_start_pos = curr->pos;
+		int curr_end_pos = curr->rpos;
+		int mate_start_pos = mate->pos;
+		int mate_end_pos = mate->rpos;
 
-		if (curr.label == "F1R2")
+		if (curr->label == "F1R2")
 		{
 			if ( (mate_start_pos + TOLERANCE_GAP < curr_start_pos) && (mate_end_pos + TOLERANCE_GAP < curr_end_pos) )
 			{
 				is_outward = true;
 			}
 		}
-
-		else if (curr.label == "F2R1")
+		else if (curr->label == "F2R1")
 		{
 			if ( (curr_start_pos + TOLERANCE_GAP < mate_start_pos) && (curr_end_pos + TOLERANCE_GAP < mate_end_pos) )
-			{	
+			{
 				is_outward = true;
 			}
 		}
@@ -394,6 +397,7 @@ int bundle_bridge::build_outward_fragments()
 		}
 	}
 
+	/*
 	for (int idx = 0; idx < outward_fragments.size(); idx++)
 	{
 		const fragment &fr = outward_fragments[idx];
@@ -406,6 +410,7 @@ int bundle_bridge::build_outward_fragments()
 			fr.h2->pos, fr.h2->rpos
 		);
 	}
+	*/
 
 	fclose(fragments_logfile);
 

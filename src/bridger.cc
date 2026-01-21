@@ -158,7 +158,7 @@ int bridger::bridge_outward_fragments()
 {
 	/*
 	printf("before bridging ... \n");
-	for(int i = 0; i < bd->outward_fragments.size(); i++)
+	for (int i = 0; i < bd->outward_fragments.size(); i++)
 	{
 		bd->outward_fragments[i].print(i);
 	}
@@ -169,30 +169,21 @@ int bridger::bridge_outward_fragments()
 	int n = bd->outward_fragments.size();
 
 	bridge_overlapped_fragments(bd->outward_fragments);
-	filter_paths(bd->outward_fragments);
 	int n1 = get_paired_fragments(bd->outward_fragments);
 
 	vector<fcluster> open_fclusters;
-	cluster_open_fragments(open_fclusters, bd->outward_fragments);
+	cluster_open_outward_fragments(open_fclusters, bd->outward_fragments);
 
-	// 1st round of briding hard fragments
-	build_junction_graph(bd->outward_fragments);
-	bridge_hard_fragments_normal(open_fclusters);
-	filter_paths(bd->outward_fragments);
+	build_junction_graph(bd->fragments);
+	bridge_hard_fragments_outward(open_fclusters);
+
 	int n2 = get_paired_fragments(bd->outward_fragments);
 
-	// 2nd round of briding hard fragments
-	build_junction_graph(bd->outward_fragments);
-	bridge_hard_fragments_normal(open_fclusters);
-	filter_paths(bd->outward_fragments);
-	int n3 = get_paired_fragments(bd->outward_fragments);
-
-	// recluster open fragments
-	open_fclusters.clear();
-	cluster_open_fragments(open_fclusters, bd->outward_fragments);
 	bridge_phased_fragments(open_fclusters);
-	filter_paths(bd->outward_fragments);
-	int n4 = get_paired_fragments(bd->outward_fragments);
+	int n3 = get_paired_fragments(bd->outward_fragments);
+	int n4 = n3;
+
+	pick_bridge_path(bd->outward_fragments);
 
 	double r1 = n1 * 100.0 / n;
 	double r2 = n2 * 100.0 / n;
@@ -200,21 +191,203 @@ int bridger::bridge_outward_fragments()
 	double r4 = n4 * 100.0 / n;
 
 	vector<int> ct = get_bridged_fragments_type(bd->outward_fragments);	// ct<ct1, ct2, ct3> paired-end, UMI-linked, both
-	if(verbose >= 1)
+	if (verbose >= 1)
 	{
-		printf("#normal fragments = %d, #fixed = %d -> %d -> %d -> %d, ratio = %.2lf -> %.2lf -> %.2lf -> %.2lf, #remain = %d, length = (%d, %d, %d), total paired-end = %d, UMI-linked only = %d, intersection: %d, bridged paired-end = %d, UMI-linked only = %d, intersection: %d\n", 
+		printf("#outward fragments = %d, #fixed = %d -> %d -> %d -> %d, ratio = %.2lf -> %.2lf -> %.2lf -> %.2lf, #remain = %d, length = (%d, %d, %d), total paired-end = %d, UMI-linked only = %d, intersection: %d, bridged paired-end = %d, UMI-linked only = %d, intersection: %d\n", 
 				n, n1, n2, n3, n4, r1, r2, r3, r4, n - n4, length_low, length_median, length_high, ct[3], ct[4], ct[5], ct[0], ct[1], ct[2]);
 	}
 
-	/*
 	printf("after bridging ... \n");
-	for(int i = 0; i < bd->outward_fragments.size(); i++)
+	for (int i = 0; i < bd->outward_fragments.size(); i++)
 	{
 		bd->outward_fragments[i].print(i);
 	}
 	printf("===\n");
-	*/
 
+	return 0;
+}
+
+int bridger::cluster_open_outward_fragments(vector<fcluster> &fclusters, vector<fragment> &frags)
+{
+	vector<fragment*> open;
+	for (int i = 0; i < frags.size(); i++)
+	{
+		fragment &fr = frags[i];
+
+		if (fr.paths.size() >= 1) {
+			continue;
+		}
+
+		if (fr.h1->vlist.size() < 2) {
+			continue;
+		}
+
+		if (fr.h2->vlist.size() < 2) {
+			continue;
+		}
+
+		int last1 = fr.h1->vlist[fr.h1->vlist.size() - 2] + fr.h1->vlist.back() - 1;
+		int last2 = fr.h2->vlist[fr.h2->vlist.size() - 2] + fr.h2->vlist.back() - 1;
+
+		// flipped inequality
+		if (last1 <= last2) {
+			continue;
+		}
+		
+		open.push_back(&(frags[i]));
+	}
+
+	if (open.size() == 0) {
+		return 0;
+	}
+
+	sort(open.begin(), open.end(), compare_fragment_v3_flank);
+
+	fcluster fc;
+	vector<int> vv1;
+	vector<int> vv2;
+
+	int32_t flank1 = 0 - max_clustering_flank;
+	int32_t flank2 = 0 - max_clustering_flank;
+	for (int k = 0; k < open.size(); k++)
+	{
+		fragment *fr = open[k];
+		int32_t f1 = fr->k1l + fr->k2l;
+		int32_t f2 = fr->k1r + fr->k2r;
+		int diff = (int) (fabs(f1 - flank1) + fabs(f2 - flank2));
+		flank1 = f1;
+		flank2 = f2;
+
+		if (fr->h1->vlist == vv1 && fr->h2->vlist == vv2 && diff <= max_clustering_flank)
+		{
+			//printf("flank1 = %d, flank2 = %d, f1 = %d, f2 = %d, diff = %d\n", flank1, flank2, f1, f2, diff);
+			fc.fset.push_back(fr);
+		}
+
+		else
+		{
+			if (fc.fset.size() >= 1) {
+				fclusters.push_back(fc);
+			}
+
+			vv1 = fr->h1->vlist;
+			vv2 = fr->h2->vlist;
+			fc.clear();
+			fc.type = 0;
+			fc.fset.push_back(fr);
+			fc.v1 = decode_vlist(vv1);
+			fc.v2 = decode_vlist(vv2);
+		}
+	}
+
+	if (fc.fset.size() >= 1) {
+		fclusters.push_back(fc);
+	}
+
+	return 0;
+}
+
+int bridger::bridge_hard_fragments_outward(vector<fcluster> &open)
+{
+	sort(open.begin(), open.end(), compare_fcluster_v1_v2);
+
+	if (verbose >= 1)
+	{
+		for (int k = 0; k < open.size(); k++)
+		{
+			open[k].print(k);
+		}
+	}
+
+	vector<int> start_vertices;
+	vector<int> end_vertices;
+	for (int i = 0; i < bd->regions.size(); i++)
+	{
+		if (jsety[i].empty() && !jsetx[i].empty()) {
+			start_vertices.push_back(i);
+		}
+
+		if (!jsety[i].empty() && jsetx[i].empty()) {
+			end_vertices.push_back(i);
+		}
+	}
+
+	for (int k = 0; k < open.size(); k++)
+	{
+		fcluster &fc = open[k];
+		int x1 = fc.v1.back();
+		int x2 = fc.v2.front();
+
+		if (x1 <= x2) {
+			continue;
+		}
+
+		vector<vector<int>> paths1;
+		for (int end_vertex : end_vertices) {
+			if (x1 > end_vertex) {
+				continue;
+			}
+
+			vector< vector<entry> > table;
+			table.resize(bd->regions.size());
+			dynamic_programming(x1, end_vertex, table);
+
+			if (table[end_vertex].empty()) {
+				continue;
+			}
+
+			vector<vector<int>> pb = trace_back(end_vertex, table);
+			paths1.insert(paths1.end(), pb.begin(), pb.end());
+		}
+
+		vector<vector<int>> paths2;
+		for (int start_vertex : start_vertices) {
+			if (start_vertex > x2) {
+				continue;
+			}
+
+			vector< vector<entry> > table;
+			table.resize(bd->regions.size());
+			dynamic_programming(start_vertex, x2, table);
+
+			if (table[x2].empty()) {
+				continue;
+			}
+
+			vector<vector<int>> pb = trace_back(x2, table);
+			paths2.insert(paths2.end(), pb.begin(), pb.end());
+		}
+
+		if (paths1.empty() || paths2.empty()) {
+			continue;
+		}
+
+		for (int i = 0; i < fc.fset.size(); i++)
+		{
+			fragment *fr = fc.fset[i];
+			for (const auto& p1 : paths1) {
+				for (const auto& p2 : paths2) {
+					path p;
+					p.v = p1;
+					p.v.insert(p.v.end(), p2.begin(), p2.end());
+					p.length = bd->compute_aligned_length(fr->k1l, fr->k2r, p.v);
+					p.v = encode_vlist(p.v);
+					p.score = 10; // placeholder score
+
+					if (p.length >= length_low && p.length <= length_high)
+					{
+						p.type = 3;
+					}
+
+					else {
+						p.type = 4;
+					}
+
+					fr->paths.push_back(p);
+				}
+			}
+		}
+	}
 	return 0;
 }
 
@@ -319,8 +492,8 @@ int bridger::bridge_overlapped_fragment(fragment &fr, int ex1, int ex2)
 	vector<int> v1 = decode_vlist(fr.h1->vlist);
 	vector<int> v2 = decode_vlist(fr.h2->vlist);
 
-	assert(v1.size() > ex1);
-	assert(v2.size() > ex2);
+	if(v1.size() <= ex1) return 0;
+	if(v2.size() <= ex2) return 0;
 
 	vector<int>::iterator t1 = v1.end() - ex1;
 	vector<int>::iterator t2 = v2.begin() + ex2;
@@ -397,6 +570,8 @@ int bridger::cluster_open_fragments(vector<fcluster> &fclusters, vector<fragment
 	{
 		fragment &fr = frags[i];
 		if(fr.paths.size() >= 1) continue;
+		if(fr.h1->vlist.size() < 2) continue;
+		if(fr.h2->vlist.size() < 2) continue;
 		//if(fr.paths.size() == 1 && fr.paths[0].type == 1) continue;
 		int last1 = fr.h1->vlist[fr.h1->vlist.size() - 2] + fr.h1->vlist.back() - 1;
 		int last2 = fr.h2->vlist[fr.h2->vlist.size() - 2] + fr.h2->vlist.back() - 1;
@@ -2658,4 +2833,3 @@ bool check_suffix(const vector<int> &vx, const vector<int> &vy)
 	}
 	return true;
 }
-

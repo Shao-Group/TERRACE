@@ -68,6 +68,7 @@ public:
 	int build_junction_graph(vector<fragment> &frags);
 	int bridge_hard_fragments_normal(vector<fcluster> &open);
 	int bridge_hard_fragments_circ(vector<fcluster> &open);
+	int bridge_hard_fragments_outward(vector<fcluster> &open);
 	int dynamic_programming(int k1, int k2, vector< vector<entry> > &table);
 	vector< vector<int> > trace_back(int k, const vector< vector<entry> > &table);
 	int evaluate_bridging_path(const vector<int> &pb);
@@ -88,6 +89,7 @@ public:
 	vector<int> get_prefix(const vector<int> &v);
 
 	int cluster_open_fragments(vector<fcluster> &fclusters, vector<fragment> &frags);
+	int cluster_open_outward_fragments(vector<fcluster> &fclusters, vector<fragment> &frags);
 	int build_path_nodes(vector<fragment> &frags);
 	int build_path_nodes(int max_len, vector<fragment> &frags);
 	int build_path_nodes(int low, int high, vector<fragment> &fragments);
