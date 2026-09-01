@@ -39,7 +39,8 @@ How to run TERRACE with the brain data?
 
 
 SHORTCUT: Run within the "src" / "brain" folder in "~/workspace/terrace/anubhav-s-terrace-2.0".
-		  alias r="cd ../src && make && cd ../brain && ../src/terrace -i CRR026084_Aligned.sortedByCoord.out.bam -o dummy_831.gtf --read_length 150"
+		  W/O ANNOTATIONS: alias r="cd ../src && make clean && make && cd ../data/brain && ../../src/terrace -i CRR026084_Aligned.sortedByCoord.out.bam -o brain_output.gtf --read_length 150 -fa ../GRCh37_human_ref.fa"
+		  W/ ANNOTATIONS: alias r="cd ../src && make clean && make && cd ../data/brain && ../../src/terrace -i CRR026084_Aligned.sortedByCoord.out.bam -o brain_output.gtf --read_length 150 -fa ../GRCh37_human_ref.fa -r ../GRCh37_human_ref_anno.gtf"
 		  r
 */
 
@@ -51,6 +52,8 @@ SHORTCUT: Run within the "src" / "brain" folder in "~/workspace/terrace/anubhav-
 #include <iomanip>
 #include <fstream>
 #include <string>
+#include <set>
+#include <algorithm>
 
 #include "bundle_bridge.h"
 #include "region.h"
@@ -145,9 +148,9 @@ int bundle_bridge::build(map <string, int> RO_reads_map, faidx_t *_fai)
 	set_hits_RO_parameter(RO_reads_map);
 
 	assign_orientation_labels();
-	build_outward_fragments();
 	build_supplementaries();
-	set_chimeric_cigar_positions(); //setting h.first_pos/second_pos etc for getting back splice positions using cigars 
+
+	set_chimeric_cigar_positions();
 	build_junctions();
 	extend_junctions();
 
@@ -163,6 +166,7 @@ int bundle_bridge::build(map <string, int> RO_reads_map, faidx_t *_fai)
 
 	fix_alignment_boundaries();
 	build_circ_fragments(); //will build fragment from h2 to h1s, added by Tasfia
+	build_outward_fragments();
 
 	//group_fragments();
 
@@ -196,7 +200,7 @@ int bundle_bridge::build(map <string, int> RO_reads_map, faidx_t *_fai)
 	bridger bdg(this);
 	bdg.bridge_normal_fragments();
 	bdg.bridge_circ_fragments();
-	bdg.bridge_outward_fragments();
+    bdg.print_splice_graph();
 
 	//extract_RO_circRNA();
 	//extract_HS_frags_circRNA();
@@ -229,11 +233,9 @@ int bundle_bridge::assign_orientation_labels() {
 		int is_read_unmapped = h.flag & 0x4;
 		int is_mate_unmapped = h.flag & 0x8;
 
-		if (is_read_unmapped >= 1 || is_mate_unmapped >= 1)
-			continue;
+		if (is_read_unmapped >= 1 || is_mate_unmapped >= 1) continue;
 
-		if (h.tid != h.mtid)  
-            continue;
+		if (h.tid != h.mtid) continue;
 
         int is_first_read = h.flag & 0x40;
         int is_second_read = h.flag & 0x80;
@@ -268,13 +270,6 @@ int bundle_bridge::assign_orientation_labels() {
 
 int bundle_bridge::build_outward_fragments()
 {
-	char filename[64];
-	snprintf(filename, sizeof(filename), "outwards_fragments_%d.txt", TOLERANCE_GAP);
-	FILE *fragments_logfile = fopen(filename, "a");
-	if (! fragments_logfile)
-		fprintf(stderr, "ERROR: system unable to open log file for writing\n");
-
-	// std::vector<fragment> outward_fragments;
 	outward_fragments.clear();
 
 	int ctp = 0; // count fragments number from paired-end reads
@@ -298,6 +293,8 @@ int bundle_bridge::build_outward_fragments()
 	{
 		hit &h = bb.hits[i];
 
+		if (h.flag & 0x800) continue; // skip supplementary alignments
+
 		// do not use hi; as long as qname, pos and isize are identical
 		int k = (h.qhash % max_index + h.pos % max_index) % max_index;
 
@@ -308,9 +305,9 @@ int bundle_bridge::build_outward_fragments()
 	{
 		hit &h = bb.hits[i];
 
-		if(h.paired == true) continue;
+		if (h.pos >= h.mpos) continue;
 
-		if(h.pos >= h.mpos) continue;
+		if (h.flag & 0x800) continue; // skip supplementary alignments
 
 		int k = (h.qhash % max_index + h.mpos % max_index) % max_index;
 
@@ -319,10 +316,9 @@ int bundle_bridge::build_outward_fragments()
 		{
 			hit &z = bb.hits[vv[k][j]];
 
-			if(z.paired == true) continue;
-			if(z.pos != h.mpos) continue;
-			if(z.qhash != h.qhash) continue;
-			if(z.qname != h.qname) continue;
+			if (z.pos != h.mpos) continue;
+			if (z.qhash != h.qhash) continue;
+			if (z.qname != h.qname) continue;
 
 			x = vv[k][j];
 			break;
@@ -342,30 +338,23 @@ int bundle_bridge::build_outward_fragments()
 			curr = &bb.hits[i];
 			mate = &bb.hits[x];
 		}
+
 		else if ( (bb.hits[x].flag & 0x40) && (bb.hits[i].flag & 0x80) )
 		{
 			curr = &bb.hits[x];
 			mate = &bb.hits[i];
 		}
-		else
-		{
-			continue;
-		}
+
+		else continue;
 
 		// skip self
-		if (curr == mate) {
-			continue;
-		}
+		if (curr == mate) continue;
 
 		// check same read name
-		if (curr->qname != mate->qname) {
-			continue;
-		}
+		if (curr->qname != mate->qname) continue;
 
 		// check mate position
-		if (curr->mpos != mate->pos) {
-			continue;
-		}
+		if (curr->mpos != mate->pos) continue;
 
 		bool is_outward = false;
 		int curr_start_pos = curr->pos;
@@ -373,19 +362,20 @@ int bundle_bridge::build_outward_fragments()
 		int mate_start_pos = mate->pos;
 		int mate_end_pos = mate->rpos;
 
+		int start_diff = mate_start_pos > curr_start_pos ? mate_start_pos - curr_start_pos : curr_start_pos - mate_start_pos;
+		int end_diff = mate_end_pos > curr_end_pos ? mate_end_pos - curr_end_pos : curr_end_pos - mate_end_pos;
+		bool same_footprint = (start_diff <= max_misalignment1) && (end_diff <= max_misalignment1);
+
 		if (curr->label == "F1R2")
 		{
-			if ( (mate_start_pos + TOLERANCE_GAP < curr_start_pos) && (mate_end_pos + TOLERANCE_GAP < curr_end_pos) )
-			{
+			if ( (mate_start_pos + TOLERANCE_GAP < curr_start_pos) && (mate_end_pos + TOLERANCE_GAP < curr_end_pos) && !same_footprint )
 				is_outward = true;
-			}
 		}
+
 		else if (curr->label == "F2R1")
 		{
-			if ( (curr_start_pos + TOLERANCE_GAP < mate_start_pos) && (curr_end_pos + TOLERANCE_GAP < mate_end_pos) )
-			{
+			if ( (curr_start_pos + TOLERANCE_GAP < mate_start_pos) && (curr_end_pos + TOLERANCE_GAP < mate_end_pos) && !same_footprint )
 				is_outward = true;
-			}
 		}
 
 		if (is_outward)
@@ -396,23 +386,6 @@ int bundle_bridge::build_outward_fragments()
 			bb.hits[x].paired = true;
 		}
 	}
-
-	/*
-	for (int idx = 0; idx < outward_fragments.size(); idx++)
-	{
-		const fragment &fr = outward_fragments[idx];
-
-		fprintf(fragments_logfile,
-			"%s\t%s\t\t%d – %d\t\t\t%d – %d\n",
-			bb.chrm.c_str(),
-			fr.h1->qname.c_str(),
-			fr.h1->pos, fr.h1->rpos,
-			fr.h2->pos, fr.h2->rpos
-		);
-	}
-	*/
-
-	fclose(fragments_logfile);
 
 	return 0;
 }
@@ -1361,6 +1334,7 @@ int bundle_bridge::build_supplementaries()
             if(((z.flag & 0x40) != (h.flag & 0x40)) || ((z.flag & 0x80) != (h.flag & 0x80))) continue;
 
         	h.suppl = &z;
+
         	break;
 
             //Taking the first supplementary read
@@ -1590,7 +1564,67 @@ int bundle_bridge::build_junctions()
 			}
 		}
 	}
-	//printf("spos map size = %d\n",m.size());
+
+	// adding BSJs (obtained from chimeric reads) to the junctions data structure
+	for (int i = 0; i < bb.hits.size(); i++)
+	{
+		hit &h = bb.hits[i];
+
+		if (h.suppl == NULL)
+		{
+			continue;
+		}
+
+		hit &s = *(h.suppl);
+
+		if ((h.flag & 0x10) != (s.flag & 0x10))
+		{
+			continue;
+		}
+
+		int32_t p1 = 0;
+		int32_t p2 = 0;
+
+		// primary alignment is upstream of supplementary
+		if (h.pos < s.pos)
+		{
+			p1 = s.rpos;
+			p2 = h.pos;
+		}
+
+		// supplementary alignment is upstream of primary
+		else if (s.pos < h.pos)
+		{
+			p1 = h.rpos;
+			p2 = s.pos;
+		}
+
+		// alignments start at the same position
+		else
+		{
+			continue;
+		}
+		
+		// must be a BSJ
+		if (p1 <= p2)
+		{
+			continue;
+		}
+
+		int64_t p = pack(p1, p2);
+		if (m.find(p) == m.end())
+		{
+			vector<int> hv;
+			hv.push_back(i);
+			m.insert(pair< int64_t, vector<int> >(p, hv));
+		}
+
+		else
+		{
+			m[p].push_back(i);
+		}
+	}
+	// printf("spos map size = %d\n",m.size());
 
 	junctions.clear();
 	junc_map.clear();
@@ -1624,6 +1658,8 @@ int bundle_bridge::build_junctions()
 		else if(s1 >= 1 && s2 >= 1) jc.strand = '.';
 		else if(s1 > s2) jc.strand = '+';
 		else jc.strand = '-';
+		if (p1 < p2) jc.junc_type = 1;
+		else jc.junc_type = 2;
 		junctions.push_back(jc);
 
 		if(junc_map.find(it->first) != junc_map.end()) continue;
@@ -1651,20 +1687,41 @@ int bundle_bridge::build_junctions()
 	// either J.count >= ratio * M, say ratio = 0.01, 
 	// or J.count >= a fixed threshold, say 10 
 
+	// Does this bundle contain any real BSJ (chimeric-split-read-confirmed back-splice)?
+	// junc_type is already set on every entry of `junctions` by the loop above, so this
+	// is a cheap pre-scan of already-available data, not a new computation.
+	bool bundle_has_bsj = false;
+	for (int j = 0; j < junctions.size(); j++)
+	{
+		if (junctions[j].junc_type == 2) { bundle_has_bsj = true; break; }
+	}
+
 	filtered_junctions.clear();
 
-	for(int j=0;j<junctions.size();j++)
+	for (int j = 0; j < junctions.size(); j++)
 	{
 		junction jc = junctions[j];
-		
-		if(jc.count >= min_junction_count_ratio*max_count || jc.count >= min_junction_count) //discard if both < 10 and < 0.01*max_count
+
+		// always keep BSJs (junc_type == 2), or apply existing count-based filtering for normal
+		// junctions. Internal (junc_type == 1) junctions in a bundle that already has confirmed BSJ
+		// evidence get the same treatment the BSJ itself receives -- no additional count filtering
+		// beyond min_splice_boundary_hits, already enforced above when `junctions` was built. Real
+		// spliceosome-mediated junctions are essentially never reproduced by chance across
+		// independent reads (unlike single-read alignment artifacts), so once independent,
+		// high-specificity BSJ evidence already confirms this is a real transcript, requiring the
+		// SAME strict min_junction_count noise-rejection bar tuned for bundles with no such
+		// evidence is not warranted for assembling that transcript's own internal exon structure.
+		// Scoped to BSJ-confirmed bundles only, so bundles with no circRNA signal at all (the vast
+		// majority) are completely unaffected.
+		if (jc.junc_type == 2 || jc.count >= min_junction_count_ratio*max_count || jc.count >= min_junction_count
+			|| (bundle_has_bsj && jc.junc_type == 1))
 		{
 			filtered_junctions.push_back(jc);
 		}
 	}
 
 	junctions.clear();
-	for(int j=0;j<filtered_junctions.size();j++)
+	for (int j = 0; j < filtered_junctions.size(); j++)
 	{
 		junction jc = filtered_junctions[j];
 		junctions.push_back(jc);
@@ -1730,6 +1787,7 @@ int bundle_bridge::extend_junctions()
 		else if(s1 >= 1 && s2 >= 1) jc.strand = '.';
 		else if(s1 > s2) jc.strand = '+';
 		else jc.strand = '-';
+		jc.junc_type = 1;
 		junctions.push_back(jc);
 		filtered_junctions.push_back(jc);
 
@@ -4471,8 +4529,6 @@ int bundle_bridge::print(int index)
 	{
 		junctions[i].print(bb.chrm, i);
 	}
-
-	printf("\n");
 
 	return 0;
 }
