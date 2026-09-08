@@ -49,6 +49,7 @@ SHORTCUT: Run within the "src" / "brain" folder in "~/workspace/terrace/anubhav-
 #include <cassert>
 #include <cstdio>
 #include <map>
+#include <unordered_map>
 #include <iomanip>
 #include <fstream>
 #include <string>
@@ -133,6 +134,7 @@ int bundle_bridge::compute_strand()
 int bundle_bridge::build(map <string, int> RO_reads_map, faidx_t *_fai)
 {
 	fai = _fai;
+
 
 	/*if(fai != NULL)
 	{
@@ -362,6 +364,16 @@ int bundle_bridge::build_outward_fragments()
 		int mate_start_pos = mate->pos;
 		int mate_end_pos = mate->rpos;
 
+		// adapter read-through guard: when the sequenced insert is shorter than
+		// the read length, both mates sequence the same molecule and land on
+		// the same genomic footprint (adapter soft-clipped at the outer ends);
+		// which mate looks "before" the other is then decided by a few bp of
+		// alignment jitter, so such pairs can spuriously satisfy the outward
+		// start/end ordering below despite carrying zero back-splice evidence
+		// (a real BSJ-spanning pair has its two mates on opposite sides of the
+		// circle, never overlapping). Reuse this function's own existing
+		// max_misalignment1 jitter tolerance -- not a new fitted constant --
+		// to reject same-footprint pairs before they can be treated as outward.
 		int start_diff = mate_start_pos > curr_start_pos ? mate_start_pos - curr_start_pos : curr_start_pos - mate_start_pos;
 		int end_diff = mate_end_pos > curr_end_pos ? mate_end_pos - curr_end_pos : curr_end_pos - mate_end_pos;
 		bool same_footprint = (start_diff <= max_misalignment1) && (end_diff <= max_misalignment1);
@@ -590,12 +602,19 @@ bool bundle_bridge::are_strings_similar(string s, string t)
 
 int bundle_bridge::get_more_chimeric()
 {
-	map<string, pair<int32_t, int32_t>> left_soft; //key:pos and seq, val junc pos pair
-	map<string, pair<int32_t, int32_t>> right_soft;
+	// The soft-clip-to-region matching below used to be an O(fragments x regions)
+	// linear scan per bundle, which combinatorially exhausted memory on a real,
+	// pathologically dense bundle (liver's albumin/ALB locus: 5,493,934 fragments x
+	// 1,213 regions). Fixed algorithmically instead of with a size cutoff: regions
+	// is a sorted, contiguous vector (see build_regions()), so each scan below now
+	// binary-searches to a narrow position-bounded window instead of scanning the
+	// whole vector -- see region_index_*() just above build_partial_exons().
+	unordered_map<string, pair<int32_t, int32_t>> left_soft; //key:pos and seq, val junc pos pair
+	unordered_map<string, pair<int32_t, int32_t>> right_soft;
 
 	left_soft.clear();
 	right_soft.clear();
-	
+
 	for(int k = 0; k < fragments.size(); k++)
 	{
 		fragment &fr = fragments[k];
@@ -943,7 +962,14 @@ int bundle_bridge::get_more_chimeric()
 			int rc_multiple = 0;
 			string hash = "";
 
-			for(int j=0;j<regions.size();j++)
+			// Position-bounded window replacing the old 0..regions.size() scan --
+			// see the region_index_*() helpers' comment above build_partial_exons().
+			int32_t lb_a = max(fr.h1->rpos, fr.h2->rpos);
+			int start_a = max(region_index_rpos_gt(lb_a),
+			                   region_index_rpos_ge(fr.h2->rpos - max_softclip_to_junction_gap));
+			int end_a = region_index_rpos_gt(fr.h2->rpos + max_softclip_to_junction_gap);
+
+			for(int j=start_a;j<end_a;j++)
 			{
 				region rc = regions[j];
 
@@ -952,7 +978,7 @@ int bundle_bridge::get_more_chimeric()
 				if(rc.rtype != LEFT_SPLICE) continue;
 
 				int32_t effective_len = min(soft_len,rc.rpos-rc.lpos+1);
-				
+
 				string new_s = s.substr(s.size()-effective_len,effective_len);
 				if(effective_len < min_soft_clip_len)
 				{
@@ -980,13 +1006,13 @@ int bundle_bridge::get_more_chimeric()
 				{
 					printf("simulate:34917 effective_len=%d, sim==%lf, read_seq=%s, region_seq=%s, region_rpos=%d\n",effective_len,similarity,new_s.c_str(),region_seq.c_str(),rc.rpos);
 				}
-				
+
 				if(similarity > min_jaccard)
 				{
 					edit_match = 1;
 					//printf("editmatch case 1: region seq pos1=%d, pos2=%d, region_seqlen = %lu\n",pos1,pos2,region_seq.size());
 				}
-				
+
 				if(edit_match == 1)
 				{
 					if(prev_pos2 != 0 && pos2 != prev_pos2)
@@ -1008,7 +1034,15 @@ int bundle_bridge::get_more_chimeric()
 			}
 
 			int rc_flag = 0;
-			for(int j=0;j<regions.size();j++)
+			// Note: this pass's gap check is on rc.lpos, NOT rc.rpos like the pass
+			// above -- a pre-existing inconsistency in the original code, preserved
+			// exactly (not "fixed") here; the window below is computed to match it.
+			int32_t lb_b = max(fr.h1->rpos, fr.h2->rpos);
+			int start_b = max(region_index_rpos_gt(lb_b),
+			                   region_index_lpos_ge(fr.h2->rpos - max_softclip_to_junction_gap));
+			int end_b = region_index_lpos_gt(fr.h2->rpos + max_softclip_to_junction_gap);
+
+			for(int j=start_b;j<end_b;j++)
 			{
 				region rc = regions[j];
 
@@ -1040,7 +1074,7 @@ int bundle_bridge::get_more_chimeric()
 				//int edit = get_edit_distance(new_s,region_seq);
 
 				double similarity = get_Jaccard(new_s,region_seq);
-				
+
 				if(similarity > min_jaccard)
 				{
 					// printf("soft left clip: combo index=0, chrm=%s, read=%s, read_pos=%d, combo_seq=%s, similarity=%lf\n",bb.chrm.c_str(),fr.h1->qname.c_str(),fr.h1->pos,new_s.c_str(),similarity);
@@ -1096,7 +1130,16 @@ int bundle_bridge::get_more_chimeric()
 			int rc_multiple = 0;
 			string hash = "";
 
-			for(int j=0;j<regions.size();j++)
+			// Shared window for both this pass and the create-pass below (blocks C
+			// and D have identical position filters, and fr doesn't change between
+			// them) -- see the region_index_*() helpers' comment above
+			// build_partial_exons().
+			int32_t ub_cd = min(fr.h1->pos, fr.h2->pos);
+			int start_cd = region_index_lpos_ge(fr.h1->pos - max_softclip_to_junction_gap);
+			int end_cd = min(region_index_lpos_ge(ub_cd),
+			                  region_index_lpos_gt(fr.h1->pos + max_softclip_to_junction_gap));
+
+			for(int j=start_cd;j<end_cd;j++)
 			{
 				region rc = regions[j];
 
@@ -1105,7 +1148,7 @@ int bundle_bridge::get_more_chimeric()
 				if(rc.ltype != RIGHT_SPLICE) continue;
 
 				int32_t effective_len = min(soft_len,rc.rpos-rc.lpos+1);
-				
+
 				string new_s = s.substr(0,effective_len);
 				if(effective_len < min_soft_clip_len)
 				{
@@ -1161,7 +1204,9 @@ int bundle_bridge::get_more_chimeric()
 			}
 
 			int rc_flag = 0;
-			for(int j=0;j<regions.size();j++)
+			// Reuses start_cd/end_cd computed above the ambiguity-check pass --
+			// same fr, same filters, no need to recompute.
+			for(int j=start_cd;j<end_cd;j++)
 			{
 				region rc = regions[j];
 
@@ -1850,6 +1895,40 @@ int bundle_bridge::build_regions()
 	}
 
 	return 0;
+}
+
+// regions is built above as a sorted, contiguous, non-overlapping partition of
+// genomic space (regions[k].rpos == regions[k+1].lpos, both lpos and rpos strictly
+// increasing over k -- see the asserts in build_partial_exons()/index_references()
+// that rely on this same invariant). get_more_chimeric() used to linearly scan the
+// whole vector per candidate soft-clip; these binary-search helpers let it jump
+// straight to the small window of regions that could possibly match instead.
+int bundle_bridge::region_index_rpos_ge(int32_t val) const
+{
+	auto it = std::lower_bound(regions.begin(), regions.end(), val,
+		[](const region &r, int32_t v){ return r.rpos < v; });
+	return (int)std::distance(regions.begin(), it);
+}
+
+int bundle_bridge::region_index_rpos_gt(int32_t val) const
+{
+	auto it = std::upper_bound(regions.begin(), regions.end(), val,
+		[](int32_t v, const region &r){ return v < r.rpos; });
+	return (int)std::distance(regions.begin(), it);
+}
+
+int bundle_bridge::region_index_lpos_ge(int32_t val) const
+{
+	auto it = std::lower_bound(regions.begin(), regions.end(), val,
+		[](const region &r, int32_t v){ return r.lpos < v; });
+	return (int)std::distance(regions.begin(), it);
+}
+
+int bundle_bridge::region_index_lpos_gt(int32_t val) const
+{
+	auto it = std::upper_bound(regions.begin(), regions.end(), val,
+		[](int32_t v, const region &r){ return v < r.lpos; });
+	return (int)std::distance(regions.begin(), it);
 }
 
 int bundle_bridge::build_partial_exons()

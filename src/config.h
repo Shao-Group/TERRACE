@@ -139,6 +139,7 @@ extern string output_file1;
 extern string output_circ_file;
 extern string cirifull_file;
 extern string feature_file;
+extern string results_tag;
 
 // for controling
 extern int batch_bundle_size;

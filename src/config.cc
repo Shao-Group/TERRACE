@@ -108,6 +108,7 @@ string output_file1 = "";
 string output_circ_file = "";
 string cirifull_file = "";
 string feature_file = "";
+string results_tag = "";
 
 // for controling
 int batch_bundle_size = 100;
@@ -162,6 +163,11 @@ int parse_arguments(int argc, const char ** argv)
 		{
 			fe_parameter = true;
 			feature_file = string(argv[i + 1]);
+			i++;
+		}
+		else if(string(argv[i]) == "--results_tag")
+		{
+			results_tag = string(argv[i + 1]);
 			i++;
 		}
 		else if(string(argv[i]) == "-r")
@@ -582,4 +588,3 @@ int print_copyright()
 	printf("TERRACE %s (c) 2023 Tasfia Zahin, Qian Shi, Xiaofei Carl Zang, and Mingfu Shao, The Pennsylvania State University\n", version.c_str());
 	return 0;
 }
-

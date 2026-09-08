@@ -77,6 +77,10 @@ public:
 	int build_junctions();
 	int extend_junctions();
 	int build_regions();
+	int region_index_rpos_ge(int32_t val) const;
+	int region_index_rpos_gt(int32_t val) const;
+	int region_index_lpos_ge(int32_t val) const;
+	int region_index_lpos_gt(int32_t val) const;
 	int build_partial_exons();
 	int build_fragments();
 	int get_frags_with_HS_on_both_sides();

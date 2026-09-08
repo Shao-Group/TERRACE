@@ -13,6 +13,7 @@ See LICENSE for licensing.
 #include "util.h"
 #include "generated_pool_gate.h"
 #include "generated_selection_scorer.h"
+#include "generated_promotion_model.h"
 #include <iostream>
 #include <algorithm>
 #include <set>
@@ -554,6 +555,13 @@ int bridger::collect_bundle_reads(int bundle_index)
 
     bundle_outward_reads[bundle_index] = ow_reads;
 
+    // Perf fix (Round 15/21): pre-index both hits and fake_hits by qname once
+    // (O(n)) instead of re-scanning the entire bundle with a string comparison
+    // for every hit that has a supplementary alignment (was O(n^2), confirmed
+    // via `sample`-based profiling to be dominated by memcmp calls on
+    // multi-hour liver hangs). Iteration order within each qname's bucket is
+    // preserved (ascending original index), so results are identical to the
+    // original linear-scan version.
     map<string, vector<int>> qname_to_hit_indices;
     for (int i = 0; i < bd->bb.hits.size(); i++)
         qname_to_hit_indices[bd->bb.hits[i].qname].push_back(i);
@@ -805,6 +813,12 @@ void bridger::write_chimeric_read_paths(int bundle_idx, const std::string& outdi
     cfout << "Chimeric Reads (" << grouped_chimeric.size() << ")\n";
     cfout << "---------------------------------\n";
 
+    // Builds bridging candidates from a specific variant of a qname's segment list (sorted by
+    // position, gaps bridged via find_pareto_paths, Cartesian product across gaps), pushing
+    // results into bundle_chimeric_merged_paths. Factored out so it can be run on more than one
+    // segment-list variant per qname -- see the call site below for why. Returns whether at
+    // least one merged path was produced (false on empty vlist or an unbridgeable gap), so the
+    // caller can retry with a different variant on failure instead of silently dropping the read.
     auto process_chimeric_variant = [&](vector<read_info> reads, const string& qname, const string& variant_label) -> bool
     {
         if (reads.size() < 2) return false;
@@ -863,6 +877,16 @@ void bridger::write_chimeric_read_paths(int bundle_idx, const std::string& outdi
 			return false;
 		}
 
+        // Find every Pareto-optimal bridge (via find_pareto_paths, full non-dominated set) between
+		// each consecutive segment pair -- mirrors the outward L/R/mid treatment. History: an
+		// earlier attempt at full retention here was reverted to a single best-by-min-edge-weight
+		// candidate (reduce_to_single_best) because it over-multiplied the candidate pool far
+		// beyond what the downstream rank-sum selection (pick_best_ranked) alone could reliably
+		// discriminate. Retried with full retention now that a learned pool gate (see
+		// write_bipartite_graph_file's circrna_candidate_pool.tsv dump / passes_pool_gate call
+		// site) exists to shrink the resulting pool before pick_best_ranked ever sees it -- a
+		// mitigating mechanism that didn't exist during the original attempt. Real recall/precision
+		// impact must still be measured fresh, not assumed from either prior result.
         vector<vector<CandidatePath>> bridges(n - 1);
         bool bridge_failed = false;
         for (int i = 0; i < n - 1; i++)
@@ -881,6 +905,10 @@ void bridger::write_chimeric_read_paths(int bundle_idx, const std::string& outdi
             else
 			{
 				bridges[i] = find_pareto_paths(v_back, v_front, -1, true);
+				// find_pareto_paths(a, a, ...) always returns a non-empty seeded set, so an empty
+				// result here can only mean v_back < v_front and genuinely unreachable in the
+				// splice graph -- not a BSJ crossing. Splicing the segments together anyway would
+				// fabricate a connection the graph doesn't support, so reject the whole candidate.
 				if (bridges[i].empty())
 				{
 					bridge_failed = true;
@@ -961,6 +989,19 @@ void bridger::write_chimeric_read_paths(int bundle_idx, const std::string& outdi
 
         if (!has_suppl || all_reads_for_qname.size() < 2) continue;
 
+        // History: two mate-aware filtering schemes were tried here (excluding the paired-end
+        // mate from the bridged segment list unconditionally, and generating both the mate-
+        // included and mate-excluded variant for every qname with an in-bundle mate) to fix a
+        // real corruption where an unrelated mate could get sorted in as a fabricated
+        // intermediate bridging segment. Real Stage B measurement (see the plan doc) showed both
+        // net-regressed recall/precision versus simply processing the full per-qname read group
+        // unconditionally, likely because generating a second near-duplicate candidate for every
+        // such qname diluted the selection pool even in the common case where the mate wasn't a
+        // problem. Ground-truth reverse-engineering (see plan doc) confirmed the corruption is
+        // real but narrow: it manifests as the mate-included bridge attempt failing outright
+        // (the mate's own splice pattern is incompatible with the true BSJ route). So: try
+        // mate-included first (unchanged from today in the common, successful case), and only
+        // fall back to a mate-excluded retry when that attempt fails to produce any path at all.
         cfout << chim_entry.first << "\n";
 
         bool ok = process_chimeric_variant(all_reads_for_qname, chim_entry.first, "all reads for qname");
@@ -1800,10 +1841,42 @@ static pair<int, double> pick_best_ranked_borda(const vector<int>& candidates, c
 	return {best_idx, (double)best_rank_sum};
 }
 
+// Selects the best candidate using the learned selection_score (generated_selection_scorer.h,
+// see evaluate/train_selection_scorer.py) as the PRIMARY criterion, with the original Borda
+// rank-sum (pick_best_ranked_borda, unchanged) kept as a deterministic tie-break for candidates
+// that land in the same scoring-tree leaf (leaf scores are discrete, so exact ties are common).
+//
+// Why on top of the rank-sum rather than replacing it: real head-to-head analysis of 2,598
+// cases where a ground-truth-matching candidate lost pick_best_ranked's vote to a false one
+// (results/circrna_selection_pool.tsv, one row per candidate per competitive round, cross-
+// referenced against ground truth) found only 67 (2.6%) were the rank-sum picking a candidate
+// strictly worse on every existing criterion -- the dominant pattern, 2,098 cases (80.8%), was
+// genuine trade-offs where neither candidate dominates on the 4 existing criteria, and within
+// those, the true candidate had MORE vertices/exons than the false winner 66.6% of the time
+// (vs. 57% for support density, 54% for edge-weight density) -- because the existing min-based
+// criteria structurally penalize longer/more complex paths just for having more chances to
+// contain one weak link. n_vertices/exon_count are the two features this adds beyond what
+// pick_best_ranked_borda already used. On a held-out 20% split of real bundles this recovered
+// selection accuracy from 84.22% (Borda alone) to 88.60% -- needs the same Stage A/B/LOTO
+// validation as every other lever in this file before being trusted beyond that single split.
 static pair<int, double> pick_best_ranked(const vector<int>& candidates, const vector<set<string>>& path_chim_reads, const vector<set<string>>& path_outward_reads, const set<string>& explained, const vector<int>& min_edge_weight, const vector<int32_t>& insert_sizes, const vector<double>& min_vertex_weight, int32_t length_median, const vector<int>& n_vertices_feat, const vector<int>& exon_count_feat, const vector<int>& weak_edge_count, const vector<int>& circ_start, const vector<int>& circ_end, const vector<int>& cross_tissue_repro_count, const vector<int>& cross_tissue_repro_full_count, const vector<double>& circ_ratio, const vector<int>& chimeric_support_weighted, const vector<int>& cross_tissue_chim_repro_count, const vector<int>& fake_supple_count, const vector<int>& supple_len)
 {
 	if (candidates.empty()) return {-1, 0.0};
 
+	// Same-outer-boundary pre-reduction: when multiple candidates in this round share the
+	// exact same (circ_start, circ_end) -- i.e. differ only in internal exon structure -- pick
+	// among just them by max min_edge_weight before the general selection_score comparison
+	// runs at all. Grounded directly in real conflict data (see the plan doc): across 7,467
+	// real same-round, same-boundary sibling groups containing both a true and a false
+	// candidate, min_edge_weight alone picks the true sibling 88.3% of the time, versus the
+	// trained selection_score's 42.9% -- the general multivariate score is measurably worse
+	// here, apparently because features like n_vertices/exon_count that usefully penalize
+	// spurious candidates GLOBALLY actively mislead when comparing structural variants of the
+	// SAME confirmed back-splice junction, where the more complete (often larger) structure is
+	// frequently the correct one despite scoring as "more complex." This only changes which
+	// candidate represents a given boundary within this round -- it does not affect comparison
+	// across DIFFERENT boundaries, which still goes through the full selection_score+Borda path
+	// below unchanged.
 	vector<int> effective_candidates;
 	{
 		auto score_of = [&](int i) {
@@ -1844,6 +1917,14 @@ static pair<int, double> pick_best_ranked(const vector<int>& candidates, const v
 			}
 			else if (min_edge_weight[idx] == min_edge_weight[incumbent])
 			{
+				// Exact tie: min_edge_weight carries zero discriminating signal here, so
+				// insertion order (previously the deciding factor, via std::set<int>'s
+				// ascending path_idx iteration) was pure luck, not evidence. Defer to the
+				// same selection_score model already trusted for every other comparison
+				// in this function instead of silently keeping the lower path_idx. Traced
+				// on real data (2026-08-22 brain rerun): 73 confirmed ground-truth circRNAs
+				// were being rejected purely because of this tie-break, with the correctly-
+				// scoring sibling sitting right there in the tied set the whole time.
 				double score_idx = score_of(idx);
 				double score_incumbent = score_of(incumbent);
 				if (score_idx > score_incumbent)
@@ -1927,6 +2008,13 @@ static pair<int, double> pick_best_ranked(const vector<int>& candidates, const v
 	return {tie_break.first, best_score};
 }
 
+// Two candidates are the same underlying BSJ, just shifted by local sequence
+// ambiguity, only if both boundaries shift by the same amount AND the shifted
+// windows are sequence-identical.
+// The shift search is bounded by read_length (an actual experimental
+// parameter, not a fitted guess): both candidate breakpoints are themselves
+// derived from reads of that length, so no legitimate ambiguity between them
+// can exceed it.
 static bool is_shifted_duplicate_bsj(bundle_bridge* bd, int s1, int e1, int s2, int e2)
 {
 	int shift = s2 - s1;
@@ -1992,10 +2080,57 @@ static vector<pair<int32_t,int32_t>> merge_path_to_exons(bundle_bridge* bd, cons
 	return exons;
 }
 
+// Exact exon-chain identity for an assembled candidate, in the same +1-shifted
+// start / unshifted end coordinates terrace_2.0.gtf records and every scorer in
+// evaluate/ hashes on. Used only by the end-of-bundle promotion pass, to
+// guarantee a promoted candidate can never duplicate a record the same bundle
+// already emitted through the normal path.
+static string promotion_chain_key(const vector<pair<int32_t, int32_t>>& exons)
+{
+	string key;
+	for (const pair<int32_t, int32_t>& ex : exons)
+	{
+		key += to_string(ex.first + 1);
+		key += "-";
+		key += to_string(ex.second);
+		key += ";";
+	}
+	return key;
+}
+
+// Cross-tissue candidate reproducibility: real, independently-generated candidate
+// evidence at the EXACT same genomic boundary in an unrelated tissue's own sample is a
+// strong, non-circular signal (uses no ground-truth labels, only sibling tissues' own
+// candidate pools) -- real circRNAs, especially anything not narrowly tissue-restricted,
+// have a real chance of generating independent supporting evidence elsewhere; a sample-
+// specific alignment/RT-switching artifact has no reason to recur at the exact same
+// coordinate in an unrelated sample. See the plan doc for the real, validated magnitude
+// (74.6% vs 26.1% reproduction rate on real brain-vs-7-other-tissues data, holding even
+// in the hardest, most-competitive candidate subset where every other signal tested this
+// session collapsed to near-zero) -- wired into passes_pool_gate/selection_score.
+//
+// Also tracks a stricter variant requiring the sibling's candidate to match the FULL
+// exon chain, not just the outer boundary -- real data showed this is a cleaner,
+// non-redundant additional signal (67.4% vs 11.8%, a true:false ratio of 5.71x vs the
+// boundary-only version's 2.86x; 90.4% of true boundary-reproducers also match full
+// structure vs only 45.2% of false ones).
+//
+// Loaded once per process run (sibling tissues' pools don't change mid-run) by scanning
+// "../*/results/circrna_candidate_pool.tsv" relative to this tissue's own working
+// directory (matches the existing outdir="results" relative-path convention used
+// throughout this file), skipping this tissue's own (possibly still-being-written)
+// output file via realpath comparison. A tissue run with no sibling tissue data present
+// simply gets an all-zero feature -- harmless, not an error.
 struct SiblingReproCounts
 {
 	map<tuple<string, int32_t, int32_t>, int> boundary;
 	map<tuple<string, int32_t, int32_t, string, string>, int> full_structure;
+	// chim_boundary: count of sibling tissues where this exact boundary has real
+	// chimeric (direct split-read) support in THAT tissue's own pool -- a strictly
+	// stronger, more direct confirmation than mere reproduction in any form (see the
+	// plan doc for the real, validated magnitude: 69.5-69.7% true rate when present vs
+	// 18.9-19.9% when absent, holding in the hardest subset and adding real separation
+	// even among candidates that already reproduce in some other form).
 	map<tuple<string, int32_t, int32_t>, int> chim_boundary;
 };
 
@@ -2007,6 +2142,21 @@ static const SiblingReproCounts& get_sibling_tissue_repro_counts(const string& o
 	if (loaded) return counts;
 	loaded = true;
 
+	// DISABLED: this used to scan sibling tissue directories (opendir("..") +
+	// reading "../<tissue>/results/circrna_candidate_pool.tsv") live, at run
+	// time -- making a single tissue's own output silently depend on whatever
+	// mutable state its sibling tissues' directories happened to be in at that
+	// exact moment. Confirmed to make results non-reproducible: two runs of the
+	// identical binary on identical input, at different points in time (with
+	// different sibling data on disk), produced measurably different recall
+	// (observed ~2-point swing from this alone). Per the function's own
+	// documented fallback, returning the all-zero `counts` here is harmless,
+	// not an error -- every candidate simply gets 0 for these three features,
+	// same as a tissue run with no sibling data present. A correct,
+	// deterministic version of this same cross-tissue-reproducibility signal
+	// now exists as a separate, validated post-processing step
+	// (evaluate/cross_tissue_pool_rescue.py) that reads only completed, static
+	// files after all tissues have finished running -- use that instead.
 	return counts;
 
 	char own_resolved[4096];
@@ -2099,6 +2249,35 @@ static const SiblingReproCounts& get_sibling_tissue_repro_counts(const string& o
 	return counts;
 }
 
+// Requires the two genomic boundary coordinates flanking a candidate back-splice
+// junction (or, equally, an ordinary internal exon-exon junction -- the check is the
+// same either way) to carry the canonical GT-AG (or, minus strand, CT-AC) donor/
+// acceptor motif. Guards against accepting short soft-clip/reference microhomology
+// produced by RT template-switching rather than genuine spliceosome-mediated
+// back-splicing -- real back-splicing reuses the same donor/acceptor signal as
+// ordinary splicing; short RT-switching microhomology generally does not preserve it.
+// Coordinate convention: get_fasta_seq(X,Y) returns the reference bases at 1-based
+// positions (X+1)..(Y+1) (htslib's faidx_fetch_seq takes 0-based coordinates
+// directly), verified directly against data/GRCh37_human_ref.fa via samtools faidx.
+//
+// circ_start/circ_end name the acceptor-role and donor-role positions respectively --
+// not necessarily the numerically lower/higher one. For an outer back-splice
+// boundary that's the same thing (circ_start < circ_end by construction); for an
+// internal exon-exon junction, pass the downstream exon's start as circ_start
+// (acceptor role) and the upstream exon's end as circ_end (donor role), even though
+// numerically circ_end < circ_start there.
+//
+// When strand is '.' (unknown) and a match is found, writes which strand it resolved
+// to into *resolved_strand_out (left untouched otherwise) -- callers that already
+// know the strand can omit this.
+//
+// treat_missing_as_canonical controls what happens when the reference fetch itself
+// fails (e.g. a boundary within 2bp of a chromosome edge) -- i.e. "we couldn't check"
+// rather than "we checked and it wasn't canonical". Defaults to false (missing data
+// is treated as a failed check), matching the strict behavior wanted where this is a
+// mandatory prerequisite for a new gate; pass true to instead skip/pass on missing
+// data, matching the original outer-boundary and internal-junction checks this helper
+// replaced, which treated an unfetchable sequence as non-disqualifying.
 static bool is_canonical_bsj_boundary(bundle_bridge* bd, int32_t circ_start, int32_t circ_end, char strand, char* resolved_strand_out = nullptr, bool treat_missing_as_canonical = false)
 {
 	string acceptor_seq = bd->get_fasta_seq(circ_start - 2, circ_start - 1);
@@ -2122,6 +2301,83 @@ static bool is_canonical_bsj_boundary(bundle_bridge* bd, int32_t circ_start, int
 	return matches_plus || matches_minus;
 }
 
+// fails_splice_signal_check: the exact outer-boundary + internal-junction canonical
+// motif check the greedy loop's winner path applies, factored out into a named
+// function so it can ALSO be applied, unmodified, as a hard pre-check before
+// promotion-model scoring further below -- a candidate that fails it can never be
+// promoted, no matter what the model scores it. Previously the promotion pass
+// bypassed every gate, including this one; this closes that internal-consistency
+// gap. resolved_strand_out follows is_canonical_bsj_boundary's own convention: only
+// written when strand == '.' and a match is found for the OUTER boundary, otherwise
+// left at whatever the caller initialized it to (normally bd->bb.strand).
+static bool fails_splice_signal_check(bundle_bridge* bd, int32_t circ_start, int32_t circ_end, char strand, const vector<pair<int32_t, int32_t>>& exons, char* resolved_strand_out)
+{
+	bool fails = !is_canonical_bsj_boundary(bd, circ_start, circ_end, strand, resolved_strand_out, true);
+
+	// A real circRNA is spliced by the same spliceosome as its host linear
+	// transcript, so every *internal* exon-exon junction (not just the
+	// back-splice boundary above) should also carry a canonical donor/
+	// acceptor motif. Apply the same GT-AG / CT-AC check used for the outer
+	// boundary to each consecutive pair of exons in the assembled structure.
+	// Passed as (down_start, up_end) since is_canonical_bsj_boundary's first
+	// argument is the acceptor-role position and second is the donor-role
+	// position -- for an internal junction that's the downstream exon's start
+	// and the upstream exon's end respectively, not the numerically lower/
+	// higher one (see the helper's own comment).
+	char junction_strand = (strand == '.' && resolved_strand_out) ? *resolved_strand_out : strand;
+	if (!fails && exons.size() > 1 && (junction_strand == '+' || junction_strand == '-'))
+	{
+		for (size_t k = 0; k + 1 < exons.size() && !fails; k++)
+		{
+			int32_t up_end = exons[k].second;
+			int32_t down_start = exons[k + 1].first;
+
+			if (!is_canonical_bsj_boundary(bd, down_start, up_end, junction_strand, nullptr, true))
+				fails = true;
+		}
+	}
+
+	return fails;
+}
+
+// promo_boundary_motif_features: fills PROMO_F_x_acc_AG..PROMO_F_x_bsj_canon_minus
+// (promotion-model features 72-78) directly from the two boundary dinucleotides,
+// reusing is_canonical_bsj_boundary's exact get_fasta_seq coordinate math (see that
+// function's own comment) rather than re-deriving it.
+static void promo_boundary_motif_features(bundle_bridge* bd, int32_t circ_start, int32_t circ_end, double* f)
+{
+	string acceptor_seq = bd->get_fasta_seq(circ_start - 2, circ_start - 1);
+	string donor_seq = bd->get_fasta_seq(circ_end, circ_end + 1);
+	for (char &c : acceptor_seq) c = toupper(c);
+	for (char &c : donor_seq) c = toupper(c);
+
+	bool acc_ag = (acceptor_seq == "AG");
+	bool acc_ac = (acceptor_seq == "AC");
+	bool don_gt = (donor_seq == "GT");
+	bool don_gc = (donor_seq == "GC");
+	bool don_ct = (donor_seq == "CT");
+
+	f[PROMO_F_x_acc_AG] = acc_ag ? 1.0 : 0.0;
+	f[PROMO_F_x_acc_AC] = acc_ac ? 1.0 : 0.0;
+	f[PROMO_F_x_don_GT] = don_gt ? 1.0 : 0.0;
+	f[PROMO_F_x_don_GC] = don_gc ? 1.0 : 0.0;
+	f[PROMO_F_x_don_CT] = don_ct ? 1.0 : 0.0;
+	f[PROMO_F_x_bsj_canon_plus] = (acc_ag && don_gt) ? 1.0 : 0.0;
+	f[PROMO_F_x_bsj_canon_minus] = (acc_ac && don_ct) ? 1.0 : 0.0;
+}
+
+// count_noncanonical_internal_junctions: companion to the (still-strict) outer-boundary
+// canonical check in fails_splice_signal_gate. Real labeled data (see the plan doc) showed
+// making the OUTER boundary AND every INTERNAL exon-exon junction strictly canonical a hard
+// pass/fail requirement was badly miscalibrated: of 256 ground-truth-exact candidates that
+// requirement rejected, 232 (90.6%) failed ONLY on an internal junction with an otherwise-
+// canonical outer boundary, while only 12.8% of genuinely false rejections failed that way --
+// the outer-boundary check alone already carries nearly all the real precision value. Fully
+// removing the internal check (tried and reverted) let recall improve but cost more precision
+// than intended via second-order competitive-round effects, not direct admission of bad-
+// junction candidates. This dump-only feature instead exposes the same per-junction
+// information as a count for the pool gate/selection scorer to weigh against a candidate's
+// other real evidence, rather than an unconditional veto.
 static int count_noncanonical_internal_junctions(bundle_bridge* bd, const vector<pair<int32_t, int32_t>>& exons, char strand)
 {
 	if (exons.size() < 2 || (strand != '+' && strand != '-')) return 0;
@@ -2137,6 +2393,20 @@ static int count_noncanonical_internal_junctions(bundle_bridge* bd, const vector
 	return count;
 }
 
+// inverted_repeat_kmer_matches: a real biological driver of back-splicing is a pair of
+// inverted repeat elements (e.g. Alu) sitting in the introns flanking a circularized
+// exon, which base-pair with each other to loop the pre-mRNA and promote back-splice
+// recognition. Counts k-mers (k=16) shared between the intronic flank immediately
+// upstream of circ_start and the REVERSE COMPLEMENT of the intronic flank immediately
+// downstream of circ_end -- the orientation in which two repeat copies would actually
+// base-pair (as opposed to direct/tandem repeat orientation, which does not promote
+// looping and was checked offline to carry far less signal). Flank length reuses
+// max_multi_exon_length (the existing, already-established exon-length cap), rather
+// than a newly-invented window -- offline validation (see the plan doc) showed the
+// signal plateaus in that same size range (AUC ~0.53-0.58 depending on exact window,
+// real and monotonic across the whole session's freshly labeled candidate pool,
+// strongest in the outward_only category where nearly every other feature tried this
+// session showed zero separation). Dump-only.
 static int inverted_repeat_kmer_matches(bundle_bridge* bd, int32_t circ_start, int32_t circ_end)
 {
 	const int32_t FLANK = max_multi_exon_length;
@@ -2172,6 +2442,13 @@ static int inverted_repeat_kmer_matches(bundle_bridge* bd, int32_t circ_start, i
 	return (int)matched.size();
 }
 
+// Prospective soft-clip-to-junction matcher, applied to a single outward read pair BEFORE the
+// L/R DP runs. If a soft-clip on one mate matches the reference flanking a real splice junction
+// on the opposite side of the pair, that junction has to be the back-splice junction -- no L/R
+// search needed for this pair. Edit-distance tolerance is derived from each read's own observed
+// mapped-portion error rate (NM aux), not a fixed/fitted constant -- self-normalizing across
+// datasets/libraries with different error profiles. Floored at 1 since requiring a literally
+// perfect match on a real junction is unrealistically strict.
 static bool find_softclip_confirmed_outward_bsj(bundle_bridge* bd, const hit* left_h, const hit* right_h,
 	const map<int32_t, int>& lpos_to_v, const map<int32_t, int>& rpos_to_v,
 	int32_t& out_bsj_start, int32_t& out_bsj_end)
@@ -2247,6 +2524,12 @@ static bool find_softclip_confirmed_outward_bsj(bundle_bridge* bd, const hit* le
 	return false;
 }
 
+// CandidatePath is declared in bridger.h (find_pareto_paths' return type must be visible there).
+//
+// A dominates B iff A is at least as good as B on every criterion and strictly better on at least
+// one. Since region coverage (.ave) is always >= 0, the -1.0 "no valid vertex weight" sentinel is
+// already numerically below any real weight, so plain >=/<= comparisons handle it correctly with
+// no special-casing.
 static bool dominates(const CandidatePath& a, const CandidatePath& b)
 {
 	bool ge = a.min_edge_weight >= b.min_edge_weight && a.min_vertex_weight >= b.min_vertex_weight && a.length <= b.length;
@@ -2270,6 +2553,17 @@ static void insert_if_nondominated(vector<CandidatePath>& frontier, const Candid
 	frontier = kept;
 }
 
+// Computes the Pareto-optimal (dominance-pruned) set of candidate paths from start to end over
+// splice_graph_adj, via topological-order dynamic programming -- valid since splice_graph_adj is
+// a DAG with edges strictly increasing by vertex index (the same invariant relied on throughout
+// this file, e.g. `if (neighbor <= end)` checks). A per-vertex Pareto frontier of non-dominated
+// partial paths is extended in increasing vertex order; a partial path is discarded the instant
+// it's dominated by another already at the same vertex, so the search never materializes more
+// states than the graph's actual non-dominated diversity -- no arbitrary length or count cutoff
+// needed to keep it tractable. len_cap, if >= 0, additionally discards any partial path whose
+// length exceeds it (used for L/R, bounded by the physical insert-size constraint); pass -1 for no
+// cap (used for the middle segment, which has no such constraint). widest_path()'s own answer is
+// always a member of the returned set, since it can never be dominated on min edge weight.
 vector<CandidatePath> bridger::find_pareto_paths(int start, int end, int32_t len_cap, bool require_canonical_junctions)
 {
 	map<int, vector<CandidatePath>> frontier;
@@ -2310,6 +2604,10 @@ vector<CandidatePath> bridger::find_pareto_paths(int start, int end, int32_t len
 
 				if (len_cap >= 0 && ext.length > len_cap) continue;
 
+				// A genuine splice-junction edge (a real intron-skip, not mere region adjacency)
+				// must carry the canonical donor/acceptor motif to be traversable, reusing the
+				// same check already applied to the outer BSJ boundary and to internal junctions
+				// of the final assembled path.
 				if (require_canonical_junctions && bd->regions[w].lpos > bd->regions[v].rpos)
 				{
 					if (!is_canonical_bsj_boundary(bd, bd->regions[w].lpos, bd->regions[v].rpos, bd->bb.strand, nullptr, true))
@@ -2326,6 +2624,23 @@ vector<CandidatePath> bridger::find_pareto_paths(int start, int end, int32_t len
 	return eit->second;
 }
 
+// Builds candidate circRNA paths from outward (discordant/outward-facing) read pairs.
+//
+// For a fixed outward pair, enumerates ALL satisfiable splice-junction candidates "L" (left of
+// the pair) and "R" (right of the pair), and for each, the full Pareto-optimal (dominance-pruned)
+// set of connecting paths to the pair's own alignment via find_pareto_paths -- bounded for L/R by
+// OUTWARD_SEGMENT_LEN_CAP (2x the median insert size), unbounded for the middle segment (which
+// connects the two mates' own alignments directly and isn't insert-size-constrained). Every
+// (L, mid, R) candidate combination is then evaluated: since the three free segments share no
+// vertices/edges with each other, each segment's own Pareto-optimal set already captures every
+// combination that could matter for the whole concatenated path -- no joint DP across all three
+// segments is needed.
+//
+// Pairs already resolved into a real chimeric BSJ by get_more_chimeric()/create_fake_fragments()
+// (hit::suppl != NULL on either mate) are skipped entirely -- they're handled by the chimeric BSJ
+// pipeline instead. Pairs where a soft-clip on either mate already matches the reference at a
+// real splice junction on the opposite side are short-circuited directly to that single confirmed
+// boundary, bypassing the L/R search.
 void bridger::build_outward_read_paths(int bundle_idx, const std::string& outdir)
 {
 	std::string filename = outdir + "/outward_possible_configs.txt";
@@ -2348,6 +2663,23 @@ void bridger::build_outward_read_paths(int bundle_idx, const std::string& outdir
 	map<string, vector<read_info>> grouped_outward;
 	for (const read_info& read : bundle_outward_reads[bundle_idx])
 		grouped_outward[read.qname].push_back(read);
+
+	// Per-bundle memoization of find_pareto_paths: many distinct outward pairs in a dense
+	// bundle resolve to identical (start,end) vertex endpoints (shared junctions/PCR-adjacent
+	// reads), so the same DP search would otherwise be recomputed from scratch for each one.
+	// Safe because find_pareto_paths is a pure function of (start,end,len_cap,canon) plus
+	// splice_graph_adj/bd->regions, both fixed for the duration of this one bundle's call --
+	// identical inputs are guaranteed to return identical results.
+	map<tuple<int,int,int32_t,bool>, vector<CandidatePath>> pareto_cache;
+	auto cached_pareto = [&](int s, int e, int32_t cap, bool canon) -> vector<CandidatePath>
+	{
+		tuple<int,int,int32_t,bool> key(s, e, cap, canon);
+		map<tuple<int,int,int32_t,bool>, vector<CandidatePath>>::iterator it = pareto_cache.find(key);
+		if (it != pareto_cache.end()) return it->second;
+		vector<CandidatePath> result = find_pareto_paths(s, e, cap, canon);
+		pareto_cache[key] = result;
+		return result;
+	};
 
 	map<int32_t, int> rpos_to_v, lpos_to_v;
 	for (int i = 0; i < bd->regions.size(); i++)
@@ -2385,7 +2717,7 @@ void bridger::build_outward_read_paths(int bundle_idx, const std::string& outdir
 		int32_t sc_start, sc_end;
 		if (find_softclip_confirmed_outward_bsj(bd, left_read->src, right_read->src, lpos_to_v, rpos_to_v, sc_start, sc_end))
 		{
-			vector<CandidatePath> mid_candidates = find_pareto_paths(v_left_last, v_right_first, -1, true);
+			vector<CandidatePath> mid_candidates = cached_pareto(v_left_last, v_right_first, -1, true);
 			for (const CandidatePath& mid : mid_candidates)
 			{
 				vector<int> mid_internal;
@@ -2435,7 +2767,7 @@ void bridger::build_outward_read_paths(int bundle_idx, const std::string& outdir
 				{
 					seen_L_pos.insert(junc.rpos);
 					int v_L = it_L->second;
-					vector<CandidatePath> raw = find_pareto_paths(v_L, v_left_first, OUTWARD_SEGMENT_LEN_CAP, true);
+					vector<CandidatePath> raw = cached_pareto(v_L, v_left_first, OUTWARD_SEGMENT_LEN_CAP, true);
 					if (!raw.empty())
 						L_candidates[v_L] = raw;
 				}
@@ -2449,7 +2781,7 @@ void bridger::build_outward_read_paths(int bundle_idx, const std::string& outdir
 				{
 					seen_R_pos.insert(junc.lpos);
 					int v_R = it_R->second;
-					vector<CandidatePath> raw = find_pareto_paths(v_right_last, v_R, OUTWARD_SEGMENT_LEN_CAP, true);
+					vector<CandidatePath> raw = cached_pareto(v_right_last, v_R, OUTWARD_SEGMENT_LEN_CAP, true);
 					if (!raw.empty())
 						R_candidates[v_R] = raw;
 				}
@@ -2472,7 +2804,7 @@ void bridger::build_outward_read_paths(int bundle_idx, const std::string& outdir
 		// Mid segment: connects the two mates' own alignments directly; not subject to the 2M
 		// cap (unlike L and R) -- full Pareto set retained, admissible only through edges whose
 		// splice junctions (real intron-skips) carry the canonical donor/acceptor motif.
-		vector<CandidatePath> mid_candidates = find_pareto_paths(v_left_last, v_right_first, -1, true);
+		vector<CandidatePath> mid_candidates = cached_pareto(v_left_last, v_right_first, -1, true);
 		if (mid_candidates.empty())
 		{
 			fout << "\tNo Middle Path Found\n\n";
@@ -2480,6 +2812,26 @@ void bridger::build_outward_read_paths(int bundle_idx, const std::string& outdir
 		}
 
 		fout << "\tNumber of Middle Path Candidates: " << mid_candidates.size() << "\n";
+
+		// The accept/reject test below (outward_insert_size in (0, CAP]) is algebraically
+		// independent of which mid candidate is chosen: expanding compute_aligned_length over
+		// the exact concatenation built below, every mid-dependent term (mid.length and the
+		// widths of its two shared endpoints v_left_last/v_right_first) cancels exactly against
+		// the same terms in mid_internal_len, leaving
+		//   outward_insert_size == l.length + r.length + CONST_term
+		// where CONST_term = CAL(left_read's own vlist) + CAL(right_read's own vlist)
+		//                     - width(v_left_first) - width(v_right_last)
+		// is fixed for this outward pair (does not depend on l, r, or mid at all). So the
+		// accept/reject decision for a given (l, r) is identical across every mid candidate --
+		// evaluating it once per (l, r) instead of once per (l, r, mid), and skipping the
+		// merged_path construction entirely for rejected (l, r) pairs, changes nothing about
+		// which combinations end up accepted or what paths get stored, only how much redundant
+		// work is done getting there.
+		int32_t left_vlist_len = bd->compute_aligned_length(0, 0, left_read->vlist);
+		int32_t right_vlist_len = bd->compute_aligned_length(0, 0, right_read->vlist);
+		int32_t width_v_left_first = bd->regions[v_left_first].rpos - bd->regions[v_left_first].lpos;
+		int32_t width_v_right_last = bd->regions[v_right_last].rpos - bd->regions[v_right_last].lpos;
+		int32_t const_term = left_vlist_len + right_vlist_len - width_v_left_first - width_v_right_last;
 
 		int combos_accepted = 0;
 		int combos_total = 0;
@@ -2491,10 +2843,17 @@ void bridger::build_outward_read_paths(int bundle_idx, const std::string& outdir
 				{
 					for (const CandidatePath& r : rp.second)
 					{
+						combos_total += (int)mid_candidates.size();
+
+						int32_t outward_insert_size = l.length + r.length + const_term;
+						if (outward_insert_size <= 0 || outward_insert_size > OUTWARD_SEGMENT_LEN_CAP)
+							continue;
+
+						int32_t l_junc_pos = bd->regions[lp.first].lpos;
+						int32_t r_junc_pos = bd->regions[rp.first].rpos;
+
 						for (const CandidatePath& mid : mid_candidates)
 						{
-							combos_total++;
-
 							vector<int> mid_internal;
 							if (mid.path.size() >= 2)
 								mid_internal.assign(mid.path.begin() + 1, mid.path.end() - 1);
@@ -2510,17 +2869,8 @@ void bridger::build_outward_read_paths(int bundle_idx, const std::string& outdir
 							merged_path.insert(merged_path.end(), r.path.begin(), r.path.end());
 							merged_path.erase(unique(merged_path.begin(), merged_path.end()), merged_path.end());
 
-							int32_t full_seq_length_o = bd->compute_aligned_length(0, 0, merged_path);
-							int32_t mid_internal_len = bd->compute_aligned_length(0, 0, mid_internal);
-							int32_t outward_insert_size = full_seq_length_o - mid_internal_len;
-
-							if (outward_insert_size > 0 && outward_insert_size <= OUTWARD_SEGMENT_LEN_CAP)
-							{
-								int32_t l_junc_pos = bd->regions[lp.first].lpos;
-								int32_t r_junc_pos = bd->regions[rp.first].rpos;
-								bundle_outward_bsj_paths[bundle_idx][pr.first][{l_junc_pos, r_junc_pos}].push_back(merged_path);
-								combos_accepted++;
-							}
+							bundle_outward_bsj_paths[bundle_idx][pr.first][{l_junc_pos, r_junc_pos}].push_back(merged_path);
+							combos_accepted++;
 						}
 					}
 				}
@@ -2547,6 +2897,16 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 
 	else
 	{
+		// Reverse the already-computed PCR-duplicate consolidation (build_chimeric_bg/
+		// build_outward_bg's SegKey grouping -- exact (pos, rpos, vlist) match per segment,
+		// i.e. same original fragment position AND splice-graph topology) into a per-qname
+		// lookup: every qname maps to its representative (itself, if it wasn't a duplicate
+		// of anything). Used below to correct the evidence gate's total_support count,
+		// which currently counts raw qnames -- PCR duplicates of one real fragment
+		// currently count as multiple independent pieces of evidence, nowhere in the
+		// pipeline corrected despite this exact consolidation already existing for
+		// graph-building purposes. Purely additive; the existing consolidation/rep_members
+		// logic and every other use of chim_bg/outward_bg is untouched.
 		map<string, string> qname_to_chim_rep;
 		for (const pair<const string, vector<string>>& rep_entry : chim_rep_members)
 			for (const string& member : rep_entry.second)
@@ -2557,6 +2917,18 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 			for (const string& member : rep_entry.second)
 				qname_to_outward_rep[member] = rep_entry.first;
 
+		// Bundle expression ceiling: the peak per-region average coverage anywhere
+		// in this bundle, i.e. a proxy for the host locus's overall linear
+		// expression level -- computed once per bundle (cheap), not per candidate.
+		// Real circRNA biology cares about the RATIO of back-splice support to
+		// host-locus expression, not raw counts: a highly-expressed gene generates
+		// more noise reads by sheer volume, so chimeric_support_reads alone doesn't
+		// normalize for this. Dump-only for now (see the plan doc for the real,
+		// validated magnitude via an offline proxy -- AUC 0.743 full pool / 0.785
+		// hard subset, one of the strongest signals found this session and one of
+		// the few that does NOT collapse in the competitive subset) -- not yet
+		// wired into passes_pool_gate/selection_score; needs re-validation against
+		// this exact (not approximated) computation at full scale first.
 		double bundle_expr_ceiling = 0.0;
 		for (const region& r : bd->regions)
 			if (r.ave > bundle_expr_ceiling)
@@ -2576,6 +2948,21 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 			}
 		}
 
+		// pre_gate_cc_size: dump-only diagnostic feature -- the size (number of
+		// distinct candidate paths) of the connected component this candidate belongs
+		// to BEFORE the pool gate runs, using the same union-find principle as the
+		// post-gate selection loop's own connected components (two candidates are
+		// linked if some single read/qname is compatible with both) but computed here
+		// on the FULL, ungated candidate pool. See the plan doc: post-gate connected-
+		// component size shows a real, strong pattern -- winners in size-1 (fully
+		// isolated) components have less than half the true rate of winners in any
+		// larger component (23.75%/30.5% depending on measurement vs 46-55%+) -- but
+        // that measurement is confounded by survivorship, since gate decisions on OTHER
+		// candidates in the same component already shrank it. This pre-gate version is
+		// the unconfounded, gate-time-computable proxy needed to actually test whether
+		// isolation itself (not just post-hoc competition) predicts falseness -- needs
+		// its own real-data validation before being trusted enough to wire into the
+		// gate itself.
 		vector<int> pre_gate_cc_size(idx_to_path.size(), 1);
 		{
 			map<int,int> pg_uf_parent;
@@ -2611,6 +2998,20 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 		}
 
 		vector<int> outward_support(idx_to_path.size(), 0);
+		// distinct_chimeric_support / distinct_outward_support: chim_bg/outward_bg are
+		// already keyed by REPRESENTATIVE qname (build_chimeric_bg/build_outward_bg's own
+		// exact-position PCR-duplicate consolidation) -- chimeric_support/outward_support
+		// below deliberately re-inflate by n_members for graph-building continuity, but
+		// that means they (and chimeric_support_reads/outward_support_reads, from an
+		// entirely separate un-consolidated count) never actually reflect deduplicated
+		// support anywhere. These count DISTINCT representatives instead (+= 1, not
+		// += n_members) -- a real, measured signal (see plan doc, Round 10/11/12): false
+		// candidates have ~50% higher PCR-duplication among their supporting reads than
+		// true ones, but a HARD evidence-gate threshold on this was measured to cost far
+		// more recall than it's worth in RNA-seq specifically (independent reads
+		// legitimately stack at shared positions due to transcript structure) -- so this
+		// is offered only as a soft feature for the learned pool gate/selection scorer to
+		// weigh probabilistically, not as a gate.
 		vector<int> distinct_chimeric_support(idx_to_path.size(), 0);
 		vector<int> distinct_outward_support(idx_to_path.size(), 0);
 		for (const pair<const string, vector<vector<int>>>& qname_entry : outward_bg)
@@ -2656,7 +3057,16 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 		vector<int> zero_coverage_vertices(idx_to_path.size(), 0);
 		vector<int> min_edge_weight(idx_to_path.size(), -1);
 		vector<int> fragment_lengths(idx_to_path.size(), -1);
+		// weak_edge_count: how many edges along this specific path fall below
+		// min_junction_count (dump-only for now, see the candidate_pool.tsv comment below --
+		// min_edge_weight alone only reports the SINGLE weakest edge, which can't distinguish a
+		// path chaining several low-support junctions from one with just a single weak link
+		// among otherwise strong ones. Not yet wired into passes_pool_gate/selection_score --
+		// validate it actually discriminates true from false on real labeled data first.
 		vector<int> weak_edge_count(idx_to_path.size(), 0);
+		// n_vertices/exon_count: features for the learned selection scorer (see
+		// generated_selection_scorer.h / pick_best_ranked below), computed once here
+		// alongside the other per-candidate features rather than recomputing per call.
 		vector<int> n_vertices_feat(idx_to_path.size(), 0);
 		vector<int> exon_count_feat(idx_to_path.size(), 0);
 
@@ -2736,6 +3146,11 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 		{
 			const string& qname = qname_entry.first;
 
+			// A representative qname stands in for every original read that was
+			// consolidated into it (identical chimeric/outward config); expand back
+			// to the full membership so support counts, the evidence gate, and the
+			// final GTF cov/transcript_id reflect the true number of distinct reads
+			// instead of undercounting to just the surviving representative.
 			map<string, vector<string>>::const_iterator cmit = chim_rep_members.find(qname);
 			map<string, vector<string>>::const_iterator omit = outward_rep_members.find(qname);
 			const vector<string>* members =
@@ -2944,8 +3359,18 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 			circ_end[i] = bd->regions[vp.back()].rpos;
 		}
 
+		// cross_tissue_repro_count / cross_tissue_repro_full_count: wired into
+		// passes_pool_gate/selection_score (see get_sibling_tissue_repro_counts's own
+		// comment and the plan doc for the real, validated magnitudes). Computed here
+		// (right after circ_start/circ_end, before the shifted-duplicate representative
+		// selection below) since that call site -- like the main greedy-loop one --
+		// needs both too.
 		vector<int> cross_tissue_repro_count(idx_to_path.size(), 0);
 		vector<int> cross_tissue_repro_full_count(idx_to_path.size(), 0);
+		// cross_tissue_chim_repro_count: dump-only (see SiblingReproCounts::chim_boundary's
+		// own comment and the plan doc for the real, validated magnitude -- stronger than
+		// cross_tissue_repro_count in every comparison, and adds real separation even
+		// among candidates that already reproduce in some other form).
 		vector<int> cross_tissue_chim_repro_count(idx_to_path.size(), 0);
 		{
 			const SiblingReproCounts& sibling_counts = get_sibling_tissue_repro_counts(outdir);
@@ -2982,6 +3407,20 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 			}
 		}
 
+		// circ_ratio: wired into passes_pool_gate/selection_score. Real circRNA
+		// biology cares about back-splice support RELATIVE to the host locus's
+		// overall linear expression, not the raw chimeric_support_reads count
+		// alone -- a highly-expressed gene generates more noise reads by sheer
+		// volume. Real CV (see the plan doc) confirmed a precomputed ratio helps
+		// while the raw bundle_expr_ceiling alone does not (and combining both is
+		// worse than the ratio alone) -- decision trees can't cleanly learn a
+		// division relationship via axis-aligned splits even with both raw
+		// components already present as separate features. Uses the STATIC total
+		// chimeric_support_reads (path_chim_reads[i].size(), matching what was
+		// validated and what passes_pool_gate itself already receives as that
+		// argument), not the dynamically-shrinking unexplained-reads count used
+		// inside the live greedy loop -- circ_ratio is a fixed structural property
+		// of the candidate, same as weak_edge_count/cross_tissue_repro_count.
 		vector<double> circ_ratio(idx_to_path.size(), 0.0);
 		for (int i : kept_indices)
 			if (bundle_expr_ceiling > 0.0)
@@ -3002,7 +3441,44 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 			internal_junction_noncanonical_count[i] = count_noncanonical_internal_junctions(bd, exons, bd->bb.strand);
 		}
 
+		// anchor_length: dump-only (not yet wired into passes_pool_gate/selection_score --
+		// validate against real labeled data first, same discipline as weak_edge_count/
+		// exon_count). For each candidate's chimeric-confirmed BSJ, the best (max) supporting
+		// read's anchor length -- the SHORTER of the two aligned (M) segments flanking the
+		// split-read breakpoint, i.e. how much real, unambiguous sequence anchors each side of
+		// the junction. Reuses hit::left_cigar_len/right_cigar_len, already computed
+		// unconditionally per-hit by set_chimeric_cigar_positions() (bundle_bridge.cc) --
+		// independent of that function's other, legacy-only consumers (verified before reuse).
+		// Real offline check (this session's plan doc): true candidates' anchors run longer
+		// (median 63bp) than false ones (median 53bp) -- real but not a clean cutoff, needs
+		// real labeled data at scale to know if it's worth wiring in.
 		vector<int> anchor_length(idx_to_path.size(), 0);
+		// fake_supple_count / supple_len: ports of the legacy TERRACE/RF-scoring tool's
+		// fake_count and supple_len features (see RF-scoring/random_forest_train_test.py
+		// and assembler.cc:768's feature dump) into this pipeline's own per-candidate
+		// representation, at the user's request. The legacy tool computed these once per
+		// circRNA-supporting fragment pair in a structurally different (fragment-consolidation)
+		// pipeline that never runs for terrace_2.0.gtf's actual output (see the plan doc); no
+		// literal cross-reference is possible, so these are native re-implementations against
+		// THIS candidate's own path_chim_reads, using the same underlying hit::is_fake /
+		// hit::suppl / hit::cigar_vector data the legacy computation used.
+		// - fake_supple_count: how many of a candidate's chimeric-supporting reads rely on a
+		//   "fake" supplementary alignment (bundle_bridge.cc's create_fake_supple, called from
+		//   get_more_chimeric() -- a soft-clip inferred/synthesized to match a splice junction,
+		//   not a real aligner-reported split) rather than a genuine, directly observed one.
+		//   Legacy used a boolean (any fake fragment in the pair); this uses a count across all
+		//   of a candidate's supporting reads for finer granularity.
+		// - supple_len: the best (max) supplementary alignment's own matched (CIGAR 'M') length
+		//   across a candidate's supporting reads -- exactly the legacy definition (sum of 'M'
+		//   ops), aggregated by max to match anchor_length's existing "best available evidence"
+		//   convention at this same site. Real offline validation (see the plan doc): both are
+		//   strong, real signals (AUC 0.70-0.77 for supple_len/chimeric_support_weighted within
+		//   competitive rounds specifically) -- wired into passes_pool_gate/selection_score.
+		// Computed here (before the union-find/pick_best_ranked block below) since that block's
+		// own pick_best_ranked call now needs chimeric_support/fake_supple_count/supple_len too
+		// (outward_support_weighted was dropped from both models this retrain round -- fresh
+		// rank-AUC on current brain labeling put it at ~0.576, no better than the already-weak
+		// outward_support_reads).
 		vector<int> fake_supple_count(idx_to_path.size(), 0);
 		vector<int> supple_len(idx_to_path.size(), 0);
 		{
@@ -3049,6 +3525,13 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 		for (int i : kept_indices)
 			uf_parent[i] = i;
 
+		// Perf fix (Round 15/21): is_shifted_duplicate_bsj can only return true
+		// when the two circ_starts differ by <= read_length (checked inside the
+		// function itself), so sorting by circ_start and sliding a window bounded
+		// by read_length visits exactly the pairs the original all-pairs loop
+		// could ever match -- identical merge result, ~O(n log n) instead of
+		// O(n^2). Confirmed via `sample`-based profiling that this loop's
+		// uf_find() calls (O(n^2) of them) dominated multi-hour hangs on liver.
 		vector<int> sorted_by_start = kept_indices;
 		sort(sorted_by_start.begin(), sorted_by_start.end(), [&](int x, int y) {
 			return circ_start[x] < circ_start[y];
@@ -3137,6 +3620,100 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 
 		kept_indices = std::move(surviving);
 
+		// Per-candidate feature dump of the surviving (post subset-dominance-pruned)
+		// BSJ candidate pool, for training an offline classifier gate to further
+		// shrink this same pool before the greedy pick_best_ranked loop below ever
+		// consumes it. One row per candidate still in kept_indices at this point.
+		// Coordinates are shifted +1 on every start position to match
+		// terrace_2.0.gtf's convention exactly (not circrna_diagnostics.tsv's
+		// 0-based circ_start/circ_end columns, which use a different convention --
+		// do not conflate the two when labeling against ground truth). Exon length
+		// features use the pipeline's own end-minus-start convention (no +1), same
+		// as the structural gate's max_single_exon_length/max_multi_exon_length
+		// checks further below, so the two stay directly comparable.
+		//
+		// Bundle-local pool context for the end-of-bundle promotion model (see the
+		// promotion pass further below and evaluate/train_promotion_model.py): how
+		// large this bundle's candidate pool is, where this candidate's chimeric
+		// support ranks inside it, how many pool candidates share its exact outer
+		// BSJ, and (pool_bsjgrp_sup_rank/pool_bsjgrp_is_top) where this candidate's
+		// total support ranks among just the other candidates at its own exact BSJ.
+		// Computed HERE, over exactly the same pre-gate kept_indices set that the
+		// circrna_candidate_pool.tsv dump below writes, because that TSV is what the
+		// model was trained on -- computing them anywhere else would silently feed the
+		// model values it never saw during training.
+		//
+		// Deliberately bundle-scoped, never tissue-scoped: bridger.cc streams one
+		// bundle at a time and never holds the whole tissue's pool, so any tissue-wide
+		// statistic (a global percentile, say) is simply not computable at run time no
+		// matter how well it scores offline. The training script mirrors this scoping.
+		vector<double> pool_bundle_size(idx_to_path.size(), 0.0);
+		vector<double> pool_support_rank(idx_to_path.size(), 0.0);
+		vector<double> pool_bsj_group_size(idx_to_path.size(), 0.0);
+		vector<double> pool_bsjgrp_sup_rank(idx_to_path.size(), 0.0);
+		vector<double> pool_bsjgrp_is_top(idx_to_path.size(), 0.0);
+
+		{
+			int n_pool = (int)kept_indices.size();
+
+			map<pair<int, int>, int> bsj_group_counts;
+			for (int i : kept_indices)
+				bsj_group_counts[{circ_start[i], circ_end[i]}]++;
+
+			vector<size_t> sorted_chim_counts;
+			sorted_chim_counts.reserve(kept_indices.size());
+			for (int i : kept_indices)
+				sorted_chim_counts.push_back(path_chim_reads[i].size());
+			sort(sorted_chim_counts.begin(), sorted_chim_counts.end());
+
+			// Exact-BSJ groups for the support-rank-within-group features
+			// (PROMO_F_x_bsjgrp_sup_rank / PROMO_F_x_bsjgrp_is_top): every candidate
+			// sharing this candidate's exact (circ_start, circ_end), ranked by total
+			// (chimeric + outward) support descending, dense-ranked so ties share a
+			// rank (a 2-way tie for the top both read rank 1 / is_top).
+			map<pair<int, int>, vector<int>> bsjgrp_members;
+			for (int i : kept_indices)
+				bsjgrp_members[{circ_start[i], circ_end[i]}].push_back(i);
+
+			for (const pair<const pair<int, int>, vector<int>>& grp : bsjgrp_members)
+			{
+				vector<int> sorted_support;
+				sorted_support.reserve(grp.second.size());
+				for (int i : grp.second)
+					sorted_support.push_back((int)(path_chim_reads[i].size() + path_outward_reads[i].size()));
+				sort(sorted_support.rbegin(), sorted_support.rend());
+
+				for (int i : grp.second)
+				{
+					int mine = (int)(path_chim_reads[i].size() + path_outward_reads[i].size());
+					int rank = 1;
+					for (int s : sorted_support)
+					{
+						if (s > mine) rank++;
+						else break;
+					}
+					pool_bsjgrp_sup_rank[i] = (double)rank;
+					pool_bsjgrp_is_top[i] = (rank == 1) ? 1.0 : 0.0;
+				}
+			}
+
+			for (int i : kept_indices)
+			{
+				pool_bundle_size[i] = (double)n_pool;
+				pool_bsj_group_size[i] = (double)bsj_group_counts[{circ_start[i], circ_end[i]}];
+
+				// pandas' rank(pct=True) with its default 'average' tie handling, which is
+				// exactly what the training script uses: every member of a tie group takes
+				// the mean of the ranks that group spans, divided by the group size.
+				size_t mine = path_chim_reads[i].size();
+				long n_less = lower_bound(sorted_chim_counts.begin(), sorted_chim_counts.end(), mine) - sorted_chim_counts.begin();
+				long n_equal = (upper_bound(sorted_chim_counts.begin(), sorted_chim_counts.end(), mine) - sorted_chim_counts.begin()) - n_less;
+				pool_support_rank[i] = (n_pool > 0)
+					? (n_less + (n_equal + 1) / 2.0) / (double)n_pool
+					: 0.0;
+			}
+		}
+
 		vector<int> gated;
 		gated.reserve(kept_indices.size());
 
@@ -3207,6 +3784,20 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 				         << total_exon_len << "\t" << max_exon_len << "\t" << min_exon_len << "\t" << avg_exon_len << "\t"
 				         << weak_edge_count[i] << "\t" << anchor_length[i] << "\t" << cross_tissue_repro_count[i] << "\t" << cross_tissue_repro_full_count[i] << "\t" << bundle_expr_ceiling << "\t" << circ_ratio[i] << "\t" << pre_gate_cc_size[i] << "\t" << cross_tissue_chim_repro_count[i] << "\t" << inverted_repeat_matches[i] << "\t" << internal_junction_noncanonical_count[i] << "\t" << fake_supple_count[i] << "\t" << supple_len[i] << "\t" << distinct_chimeric_support[i] << "\t" << distinct_outward_support[i] << "\n";
 
+				// Learned candidate-pool gate (generated_pool_gate.h, see
+				// scripts/gen_pool_gate.py) -- filters this same surviving pool down
+				// further, using the identical features just dumped above, before the
+				// greedy pick_best_ranked loop below ever consumes it. Averages all 30
+				// trees' leaf class-1 fractions and compares to a fitted probability
+				// threshold (0.16, chosen via the CV sweep in train_pool_gate.py for
+				// the highest specificity clearing a 98% sensitivity floor).
+				//
+				// The three sentinel-valued features are passed as 0 (not their raw
+				// -1/-1.0 sentinel) when invalid, mirroring exactly how
+				// evaluate/train_pool_gate.py's SENTINEL_VALUE_COLUMNS handling
+				// zeroed them out at training time -- the *_valid flag is itself the
+				// feature that tells the tree the value is missing, so the raw
+				// sentinel must never leak through as if it were a real magnitude.
 				bool mew_valid = min_edge_weight[i] >= 0;
 				bool mvw_valid = min_vertex_weight[i] >= 0.0;
 				bool isd_valid = insert_sizes[i] >= 0;
@@ -3222,12 +3813,42 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 					circ_ratio[i], chimeric_support[i], cross_tissue_chim_repro_count[i], fake_supple_count[i], supple_len[i],
 					anchor_length[i], distinct_chimeric_support[i]);
 
+				// Direct structural check, not learned by the tree: real labeled data (see the
+				// plan doc) showed weak_edge_count -- how many sub-min_junction_count edges a
+				// path chains, not just its single weakest one -- has a hard, clean cutoff: of
+				// 1,044 real weak-edge circRNAs sampled, ALL had weak_edge_count <= 5, while a
+				// long tail of ~1,091 false candidates ran from 6 up to 53 with zero true
+				// examples anywhere in that range. The retrained gate tree didn't split on this
+				// (its impact is a small slice of the whole pool relative to the tree's pruning
+				// budget), so it's applied directly here, the same way other pipeline structural
+				// bounds (max_circ_vsize etc.) are -- a real, CV-unvalidated-but-data-derived
+				// bound on a specific pathological pattern, not a replacement for the gate.
 				if (weak_edge_count[i] > 5)
 					gate_pass = false;
 
+				// Same direct-check pattern, exon_count: across the WHOLE labeled candidate pool
+				// (16,078 true rows), the single largest true exon_count ever observed was 21 --
+				// zero true candidates exist above that, out of 141,482 false rows spanning up to
+				// 154 exons. Below the zero-cost boundary the same gradient holds (exon_count<=15
+				// keeps 99.91% of all true candidates while removing 4.5x more false rows than
+				// the zero-cost cutoff alone), but only the exact zero-cost bound (21) is applied
+				// here to keep this an unconditional, not-even-marginal, recall-preserving cut.
 				if (exons.size() > 21)
 					gate_pass = false;
 
+				// Single-exon, chimeric-only-supported candidates are a distinct, large noise
+				// population (real labeled data, see the plan doc): 23,429 of these exist in the
+				// whole pool (14.9%) at only 2.22% precision, versus 10.96% for multi-exon
+				// chimeric-only candidates -- 5x noisier, and structurally invisible to the
+				// weak_edge_count check above (single-exon paths have zero internal edges by
+				// construction, so weak_edge_count is always 0 for them). Within this specific
+				// population, chimeric_support_reads and min_vertex_weight (both already existing
+				// features) separate far more cleanly than in the mixed population. Chose the
+				// safest real cutoff found (not zero-cost, but close): requiring EITHER
+				// chimeric_support_reads>=3 OR min_vertex_weight>=5 keeps 99.4% of true candidates
+				// in this subgroup (518/521, losing only 3 of the pool's 16,078 true rows overall)
+				// while removing 8.8% of this subgroup's false candidates (2,007 rows). Scoped
+				// tightly to this exact population so it cannot affect any other candidate class.
 				bool is_single_exon_chimeric_only = (exons.size() == 1)
 					&& !path_chim_reads[i].empty() && path_outward_reads[i].empty();
 				if (is_single_exon_chimeric_only
@@ -3488,12 +4109,21 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 		std::string gtf_filename = outdir + "/terrace_2.0.gtf";
 		std::ofstream gtf_out(gtf_filename, std::ios_base::app);
 
+		// Diagnostic feed for investigating false positives/negatives per selection
+		// attempt -- accepted or gate-rejected -- since the GTF output only ever
+		// records accepted candidates. Header is repeated per bundle (prefixed with
+		// '#' so it's harmless to skip/ignore downstream).
 		std::string diag_filename = outdir + "/circrna_diagnostics.tsv";
 		std::ofstream diag_out(diag_filename, std::ios_base::app);
 		diag_out << "#bundle_idx\tcc_id\titeration\tpath_id\tchrm\tstrand\t"
 		         << "circ_start\tcirc_end\tn_vertices\tresidual_chimeric\tresidual_outward\t"
 		         << "min_edge_weight\tmin_vertex_weight\tinsert_size\tinsert_size_deviation\tgate_result\n";
 
+		// Per-emitted-circRNA feature file for downstream classifier training,
+		// keyed by the same tid string used as the GTF's transcript_id (unique
+		// per emitted circRNA -- unlike circrna_diagnostics.tsv, no coordinate
+		// offset/dedup ambiguity when joining against terrace_2.0.gtf). Header
+		// repeated per bundle, same as circrna_diagnostics.tsv, harmless to skip.
 		std::string feat_filename = outdir + "/circrna_features.tsv";
 		std::ofstream feat_out(feat_filename, std::ios_base::app);
 		feat_out << "#tid\tchrm\tstrand\tcirc_start\tcirc_end\tn_vertices\t"
@@ -3507,6 +4137,20 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 		int total_selected = 0;
 		int comp_num_circ = 1;
 
+		// Cross-connected-component / cross-iteration same-outer-boundary duplicate
+		// reduction: each connected component below runs a fully independent greedy
+		// selection loop, so pick_best_ranked()'s same-outer-boundary sibling
+		// pre-reduction (which already picks the max-min_edge_weight candidate when
+		// several share an exact (circ_start, circ_end)) can only ever compare
+		// candidates that land in the SAME component AND the SAME loop iteration. Real
+		// ground-truth-labeled data on this exact build showed 2,992 exact-outer-
+		// boundary duplicate groups make it into the final output regardless -- 69.4%
+		// of them spanning DIFFERENT connected components, entirely invisible to that
+		// existing fix no matter how it's extended within a single pick_best_ranked()
+		// call (see the plan doc for the full measurement). This accumulates every
+		// component's selected candidates bundle-wide (unchanged from today otherwise)
+		// so a second, bundle-wide pass below can catch the ones the per-component loop
+		// structurally cannot.
 		struct BundleSelectedEntry
 		{
 			int idx;
@@ -3519,20 +4163,104 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 		};
 		vector<BundleSelectedEntry> bundle_wide_selected;
 
+		// End-of-bundle PROMOTION pass (generated_promotion_model.h, see
+		// evaluate/train_promotion_model.py for how it is trained and validated).
+		//
+		// The pool gate decides what enters the greedy loop below and the selection
+		// scorer decides who wins a round; neither ever revisits the large population
+		// of candidates that entered the loop, lost every round it competed in (or won
+		// one and was then rejected by a gate), and was dropped for good. Once every CC
+		// in this bundle's greedy loop has terminated AND the bundle-wide cross-CC-
+		// duplicate reduction below has run, every such never-selected candidate is
+		// scored by a third, separate learned model and additionally emitted if the
+		// calibrated probability that it is a real circRNA is at least
+		// PROMOTION_THRESHOLD (0.50, the natural "more likely true than false"
+		// boundary, not a fitted cutoff).
+		//
+		// The pass is strictly additive and strictly terminal: it runs only after every
+		// CC's loop has stopped, never removes/reorders/reclassifies a candidate the
+		// loop already selected, never marks a read explained, and never re-enters the
+		// loop. Deliberately deferred to BUNDLE scope (not scored per-CC as an earlier
+		// version of this pass did) because features PROMO_F_x_bsj_emitted..
+		// PROMO_F_x_span_overlap_emit need to see this bundle's TRUE final winner set --
+		// i.e. after keep_bundle_wide's cross-CC-duplicate reduction has run, not an
+		// in-progress per-CC snapshot that reduction may still change. Promoted
+		// candidates are themselves held out of that same reduction: a promotion must
+		// never be able to displace a real winner from its own same-boundary group.
+		//
+		// PromotionTrack is the loop bookkeeping the model's selection-process features
+		// need -- how long a candidate competed, the best round it reached, its closest
+		// margin to a round winner, and (if it ever won) which gate rejected it. None of
+		// this exists as a per-candidate value anywhere else in the pipeline. Tracked
+		// per-CC (reset each iteration of the loop below, exactly like `explained`)
+		// since a candidate belongs to exactly one CC.
+		struct PromotionTrack
+		{
+			int n_rounds;
+			int min_iter;
+			int max_iter;
+			int ever_winner;
+			int unexp_chim_max;
+			int unexp_outw_max;
+			double best_margin;
+			int min_round_size;
+			string gate;
+
+			PromotionTrack() : n_rounds(0), min_iter(0), max_iter(0), ever_winner(0),
+				unexp_chim_max(0), unexp_outw_max(0), best_margin(0.0), min_round_size(0) {}
+		};
+
+		// Bundle-wide pool of never-selected candidates collected across every CC,
+		// each already carrying its fully-assembled features 0-59 (everything that
+		// does NOT depend on the bundle's final emitted set) and having already passed
+		// the fails_splice_signal_check() hard pre-check. Features 60-78 are filled in
+		// once, after the whole bundle's CC loop and keep_bundle_wide have both run
+		// (see below), then the model is scored and PROMOTION_THRESHOLD applied.
+		struct PromotionPoolEntry
+		{
+			int idx;
+			int comp_num_circ;
+			double f[PROMOTION_MODEL_N_FEATURES];
+		};
+		vector<PromotionPoolEntry> promotion_pool_all;
+
+		struct PromotedEntry
+		{
+			int idx;
+			int comp_num_circ;
+			double probability;
+		};
+		vector<PromotedEntry> bundle_wide_promoted;
+
 		for (pair<const int, vector<int>>& comp_entry : comp_paths)
 		{
 			const vector<int>& comp_path_indices = comp_entry.second;
 
 			set<int> available(comp_path_indices.begin(), comp_path_indices.end());
 			set<string> explained;
+			// Frozen at empty for the lifetime of this CC: used ONLY to rank/order candidates via
+			// pick_best_ranked, so each candidate's ranking reflects its own full original support,
+			// not an artifact of which round the shrinking residual pool happens to place it in.
+			// Acceptance itself (residual_chim/residual_out below, and the evidence/splice/structural
+			// gates) continues to use the real, mutating `explained` set, unchanged -- this only
+			// changes the ORDER candidates are given their one evaluation, never whether a candidate
+			// with no real remaining evidence can be accepted.
 			const set<string> orig_explained;
 
 			vector<pair<int, double>> selected;
 			// Reads at time of selection (chimeric, outward)
 			vector<pair<set<string>, set<string>>> selected_reads;
+			// Per-candidate resolved strand (see splice-signal gate below); only
+			// differs from bd->bb.strand for '.'-strand bundles where the motif
+			// itself resolves which strand the junction is actually on.
 			vector<char> selected_strand;
 
 			int iteration = 0;
+
+			// Selection-process bookkeeping for this CC's promotion pass, keyed by
+			// candidate index. Written only from inside the loop below and read only
+			// after it terminates -- it never influences a selection decision.
+			map<int, PromotionTrack> promo_track;
 
 			while (!available.empty())
 			{
@@ -3564,6 +4292,11 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 				}
 
 				if (!any_unexplained) break;
+
+				// Select the best available path via the shared pick_best_ranked() selector: the
+				// learned selection_score (see its own definition above) picks first, with the
+				// original 5-feature Borda rank-sum (pick_best_ranked_borda) as a deterministic
+				// tie-break among candidates the model scores identically.
 
 				vector<int> avail_vec;
 				for (int idx : available)
@@ -3600,6 +4333,13 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 				int best_path = best.first;
 				double best_rank_sum = best.second;
 
+				// Full-competing-pool dump: unlike circrna_diagnostics.tsv (winner only),
+				// this logs EVERY candidate pick_best_ranked considered this iteration --
+				// not just whoever won -- so a true (ground-truth-matching) candidate that
+				// lost the vote can be directly compared, feature-by-feature, against
+				// whatever specific candidate beat it, entirely offline. Written before any
+				// gate/explained-set mutation below, so this reflects the exact pool
+				// pick_best_ranked itself saw.
 				{
 					std::string sel_filename = outdir + "/circrna_selection_pool.tsv";
 					std::ofstream sel_out(sel_filename, std::ios_base::app);
@@ -3651,6 +4391,66 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 					}
 				}
 
+				// Per-candidate selection-process bookkeeping for this CC's promotion
+				// pass: for every candidate in this round's competing field, record how
+				// many rounds it has now survived, the earliest and latest round it
+				// reached, the peak unexplained support it still had to offer, the
+				// smallest field it ever faced, and how close its min_edge_weight came
+				// to this round's best (0 == it tied the round's leader). These mirror,
+				// quantity for quantity, the aggregates evaluate/train_promotion_model.py
+				// reconstructs offline from circrna_selection_pool.tsv, so the model is
+				// scored at run time on exactly what it was trained on. min_edge_weight
+				// is used for the margin (rather than the selection_score that actually
+				// decides the round) because that is the ranking quantity the offline
+				// dump records per candidate per round, so the two definitions can be
+				// held identical. Purely observational -- nothing here changes the loop.
+				{
+					int round_size = (int)avail_vec.size();
+					int round_max_mew = -1;
+					for (int idx : avail_vec)
+					{
+						int mew = (min_edge_weight[idx] >= 0) ? min_edge_weight[idx] : -1;
+						if (mew > round_max_mew) round_max_mew = mew;
+					}
+
+					for (int idx : avail_vec)
+					{
+						PromotionTrack& tr = promo_track[idx];
+						int mew = (min_edge_weight[idx] >= 0) ? min_edge_weight[idx] : -1;
+						double margin = (double)(mew - round_max_mew);
+
+						if (tr.n_rounds == 0)
+						{
+							tr.min_iter = iteration + 1;
+							tr.best_margin = margin;
+							tr.min_round_size = round_size;
+						}
+						else
+						{
+							if (margin > tr.best_margin) tr.best_margin = margin;
+							if (round_size < tr.min_round_size) tr.min_round_size = round_size;
+						}
+
+						tr.n_rounds++;
+						tr.max_iter = iteration + 1;
+
+						int unexp_chim = 0;
+						for (const string& r : path_chim_reads[idx])
+						{
+							if (!explained.count(r)) unexp_chim++;
+						}
+
+						int unexp_outw = 0;
+						for (const string& r : path_outward_reads[idx])
+						{
+							if (!explained.count(r)) unexp_outw++;
+						}
+
+						if (unexp_chim > tr.unexp_chim_max) tr.unexp_chim_max = unexp_chim;
+						if (unexp_outw > tr.unexp_outw_max) tr.unexp_outw_max = unexp_outw;
+					}
+				}
+
 				if (best_path < 0) break;
 
 				set<string> residual_chim;
@@ -3672,41 +4472,126 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 				int32_t circ_start = bd->regions[best_vpath.front()].lpos;
 				int32_t circ_end = bd->regions[best_vpath.back()].rpos;
 
+				// circ_start/circ_end above are the extreme REGION's edge, not
+				// necessarily a coordinate any supporting read actually starts or
+				// ends at -- when a read's segment begins or ends partway inside
+				// that region, the emitted boundary is fabricated (no read ever
+				// observed it). Verified directly in the BAM: such candidates are
+				// typically a short supplementary alignment lying entirely inside
+				// its own primary's footprint -- a local split artifact, not a
+				// real back-splice. Reject when there is direct chimeric BSJ
+				// evidence to check the boundary against but no read segment
+				// actually starts at circ_start or none ends at circ_end (left and
+				// right may be anchored by different reads). Exact-position match
+				// only, no tolerance -- a fitted snap-distance cutoff was measured
+				// to be worse. Outward-only candidates (no chimeric reads to check
+				// against) are unaffected.
+				bool fails_anchor_gate = false;
+				if (!path_chim_reads[best_path].empty())
+				{
+					bool left_anchored = false;
+					bool right_anchored = false;
+					for (const read_info& r : bundle_chimeric_reads[bundle_idx])
+					{
+						if (!path_chim_reads[best_path].count(r.qname)) continue;
+						if (r.pos == circ_start) left_anchored = true;
+						if (r.rpos == circ_end) right_anchored = true;
+						if (left_anchored && right_anchored) break;
+					}
+					fails_anchor_gate = !(left_anchored && right_anchored);
+				}
+
+				// Reverted to raw qname counting (see plan doc, Round 12): a hard PCR-
+				// duplicate-corrected threshold here was measured to cost far more recall
+				// than it should -- in RNA-seq (unlike DNA-seq), independent reads
+				// legitimately stack at the same position due to transcript structure, so
+				// exact-position dedup over-flags real independent reads. The duplication
+				// signal is real but belongs in the learned scorer as a soft feature
+				// (distinct_chim_support/distinct_outward_support, computed below and fed
+				// to selection_score/passes_pool_gate), not as an absolute gate cutoff.
 				size_t total_support = residual_chim.size() + residual_out.size();
+				// A lone chimeric read's own outer BSJ-crossing gap is assigned
+				// min_edge_weight = INT_MAX at generation time (empty_bridge, bridger.cc:882) --
+				// a sentinel meaning "no constraint here", not "well corroborated" -- so
+				// min_edge_weight on a lone-chimeric candidate reflects only unrelated
+				// internal structure it happens to sit near, never the actual junction's own
+				// support. Traced on real data (2026-08-22 brain run): candidates with exactly
+				// 1 chimeric read and 0 outward reads are 0.66% true (35/5,329) vs. 10.3% for
+				// every other candidate -- rescuing this population via min_edge_weight was
+				// the direct cause of confirmed Frankenstein false positives (ASH1L, CLSTN1).
+				// A lone read of EITHER kind now gets no rescue, matching the outward-only
+				// case below and the field-standard >=2-junction-read minimum used by other
+				// circRNA callers.
 				bool fails_evidence_gate = (total_support < 2);
+
+				// Cross-tissue reproducibility rescue: a candidate with only 1 supporting
+				// read in THIS sample that nonetheless has the exact same full exon chain
+				// independently generated in >=2 other tissues' own candidate pools (see
+				// get_sibling_tissue_repro_counts) is real, corroborated evidence from an
+				// orthogonal, non-circular source -- not a single-read artifact. Real
+				// labeled data (2026-08-25 brain run): this total_support==1 population is
+				// 8.2% true overall vs 47.3% (chimeric-only) / 35.3% (outward-only) once
+				// cross_tissue_repro_full_count>=2 -- both above the pipeline's own overall
+				// precision. Threshold=2 is the smallest count at which the rescued
+				// population's own true rate already clears that bar.
 				if (fails_evidence_gate && cross_tissue_repro_full_count[best_path] >= 2)
 					fails_evidence_gate = false;
+
+				// Every inferred (bridging) connection in the assembled path is an edge in the
+				// splice graph, and the graph already treats min_junction_count as the bar for
+				// "enough independent read support to trust this junction" (config.cc:30, used
+				// elsewhere for junction filtering). min_edge_weight is already the minimum
+				// across every edge on the whole path -- requiring it to clear that same,
+				// already-established bar universally (not just in the single-outward-read
+				// rescue case above) naturally penalizes longer/more complex bridging paths more
+				// than short ones, since each additional inferred hop is one more chance for a
+				// weak link. No new constant.
+				// Same relaxation as build_junctions()'s BSJ-confirmed-bundle exemption (see that
+				// function's comment): a candidate with real, direct chimeric split-read evidence
+				// for its own outer BSJ (path_chim_reads[best_path] non-empty) already carries
+				// independent, high-specificity confirmation that this is a real transcript --
+				// re-applying the SAME min_junction_count noise bar to its internal structure here
+				// is inconsistent with having already exempted those same internal junctions at the
+				// graph-construction stage. Pure outward-inferred candidates (no direct chimeric BSJ
+				// read) get no such exemption -- weaker overall evidence still justifies the full bar.
 				bool has_chimeric_bsj_support = !path_chim_reads[best_path].empty();
 				if (!fails_evidence_gate && !has_chimeric_bsj_support && min_edge_weight[best_path] >= 0 && min_edge_weight[best_path] < min_junction_count)
 					fails_evidence_gate = true;
 
+				// Structural sanity check on the merged exon layout: an implausibly
+				// high exon count, an implausibly long single unspliced exon (likely
+				// intron retention / a missed internal junction), or an implausibly
+				// long individual exon within a multi-exon call (likely a merged pair
+				// of exons) are all signs of a misassembled candidate rather than a
+				// real circRNA. Thresholds reuse the pipeline's own pre-existing,
+				// already-configured constants (max_circ_vsize, max_single_exon_length,
+				// max_multi_exon_length in config.cc), which were defined for exactly
+				// this purpose but never wired into the gate.
+				//
 				vector<pair<int32_t, int32_t>> best_exons = merge_path_to_exons(bd, best_vpath);
 
+				// Uses fails_splice_signal_check() (see its own definition above,
+				// factored out so the promotion pass below can apply this exact same
+				// check as a hard pre-check, not just the greedy loop).
 				bool fails_splice_signal_gate = false;
 				char resolved_strand = bd->bb.strand;
 				if (!fails_evidence_gate)
-				{
-					fails_splice_signal_gate = !is_canonical_bsj_boundary(bd, circ_start, circ_end, bd->bb.strand, &resolved_strand, true);
-
-					char junction_strand = (bd->bb.strand == '.') ? resolved_strand : bd->bb.strand;
-					if (!fails_splice_signal_gate && best_exons.size() > 1
-						&& (junction_strand == '+' || junction_strand == '-'))
-					{
-						for (size_t k = 0; k + 1 < best_exons.size() && !fails_splice_signal_gate; k++)
-						{
-							int32_t up_end = best_exons[k].second;
-							int32_t down_start = best_exons[k + 1].first;
-
-							if (!is_canonical_bsj_boundary(bd, down_start, up_end, junction_strand, nullptr, true))
-								fails_splice_signal_gate = true;
-						}
-					}
-				}
+					fails_splice_signal_gate = fails_splice_signal_check(bd, circ_start, circ_end, bd->bb.strand, best_exons, &resolved_strand);
 
 				bool fails_contig_gate = !is_primary_chromosome(bd->bb.chrm);
 
 				bool fails_structural_gate = false;
 
+				// Cross-tissue reproducibility rescue (same signal/rationale as the
+				// evidence-gate rescue above): a structurally-capped candidate
+				// independently reproduced with the exact same exon chain in another
+				// tissue's own pool is far more likely a real, unusually-long/complex
+				// circRNA than a misassembly. Real labeled data: exon-count cap failures
+				// are 14.8% true overall vs 22.2% once cross_tissue_repro_full_count>=1;
+				// multi-exon-length cap failures are 21.7% true overall vs 28.0% at the
+				// same threshold -- both above the pipeline's overall precision once
+				// rescued. The single-long-exon cap below has no validated rescue signal
+				// and is left as an unconditional gate.
 				bool structural_rescue = cross_tissue_repro_full_count[best_path] >= 1;
 
 				if ((int)best_exons.size() > max_circ_vsize)
@@ -3739,6 +4624,17 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 					else if (fails_splice_signal_gate) gate_result = "splice_signal";
 					else if (fails_contig_gate) gate_result = "contig";
 					else if (fails_structural_gate) gate_result = "structural";
+					else if (fails_anchor_gate) gate_result = "anchor";
+
+					// Promotion bookkeeping: this candidate actually WON its round, so
+					// whatever gate (if any) rejected it afterwards is the single most
+					// informative thing known about why it was never emitted. Reuses this
+					// exact same gate_result classification rather than recomputing it, so
+					// the run-time feature and the offline one (read straight out of
+					// circrna_diagnostics.tsv's gate_result column) cannot disagree.
+					PromotionTrack& winner_track = promo_track[best_path];
+					winner_track.ever_winner = 1;
+					winner_track.gate = gate_result;
 
 					diag_out << bundle_idx << "\t" << comp_num_circ << "\t" << iteration << "\t"
 					         << best_path << "\t" << bd->bb.chrm << "\t" << bd->bb.strand << "\t"
@@ -3764,7 +4660,7 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 				}
 
 				if (!fails_evidence_gate && !fails_splice_signal_gate
-					&& !fails_contig_gate && !fails_structural_gate)
+					&& !fails_contig_gate && !fails_structural_gate && !fails_anchor_gate)
 				{
 					selected.push_back({best_path, best_rank_sum});
 					selected_reads.push_back({residual_chim, residual_out});
@@ -3857,14 +4753,223 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 				}
 				circ_out << "]\n\n";
 
+				// Defer the actual GTF/feature-file emission to the bundle-wide
+				// cross-component duplicate pass below -- accumulate this winner's
+				// identity now, exactly as it would have been written today.
 				if (!idx_to_path[idx].empty())
 					bundle_wide_selected.push_back({idx, comp_num_circ, rank + 1, residual_cr, residual_or, selected_strand[rank], score});
+			}
+
+			// Collect this CC's never-selected candidates into the bundle-wide
+			// promotion pool (see the PromotionTrack/PromotionPoolEntry declarations
+			// above for the full rationale). The greedy loop has fully terminated by
+			// this point -- `available` is exhausted, every winner is already in
+			// `selected` and already accumulated into bundle_wide_selected -- so
+			// nothing below can feed back into it. Actual scoring is deferred until
+			// after every CC in this bundle has run this same block AND
+			// keep_bundle_wide has reduced bundle_wide_selected to its final form
+			// (see further below), since several of the model's features need to see
+			// that true final winner set, not an in-progress per-CC snapshot.
+			//
+			// The feature vector must be assembled in exactly the order
+			// evaluate/train_promotion_model.py's FEATURES list defines; the
+			// PROMO_F_* enum in generated_promotion_model.h is generated from that
+			// same list, so naming each slot here keeps the two in lockstep.
+			// Sentinel-valued features are passed as 0 (never their raw -1/-1.0
+			// sentinel) with the accompanying *_valid flag carrying the missingness,
+			// the same convention the passes_pool_gate call site above already uses
+			// and the same one the training script applies to the "NA" cells.
+			// Features 60-68 (bundle-emission-relation / BSJ-group standing) are left
+			// at their zero-initialized default here and filled in at the deferred
+			// scoring point below, once this bundle's true final winner set exists.
+			{
+				set<int> selected_idx;
+				for (const pair<int, double>& s : selected)
+					selected_idx.insert(s.first);
+
+				for (int idx : comp_path_indices)
+				{
+					if (selected_idx.count(idx)) continue;
+
+					vector<pair<int32_t, int32_t>> promo_exons = merge_path_to_exons(bd, idx_to_path[idx]);
+					if (promo_exons.empty()) continue;
+
+					int n_chim = (int)path_chim_reads[idx].size();
+					int n_outw = (int)path_outward_reads[idx].size();
+
+					// A candidate with no supporting reads at all has no support
+					// category to be classified into, so it could never have been
+					// emitted as a normal winner either. Never promote one.
+					if (n_chim + n_outw <= 0) continue;
+
+					// Hard pre-check: reuse the exact same splice-signal check the
+					// greedy loop's winner path applies (fails_splice_signal_check,
+					// defined above) -- a candidate that fails it can never be
+					// promoted, regardless of what the model scores it. Closes the
+					// gap where the promotion pass previously bypassed every gate,
+					// including this one.
+					char promo_resolved_strand = bd->bb.strand;
+					if (fails_splice_signal_check(bd, circ_start[idx], circ_end[idx], bd->bb.strand, promo_exons, &promo_resolved_strand))
+						continue;
+
+					int32_t promo_total_exon_len = 0;
+					int32_t promo_max_exon_len = 0;
+					int32_t promo_min_exon_len = promo_exons[0].second - promo_exons[0].first;
+					for (const pair<int32_t, int32_t>& ex : promo_exons)
+					{
+						int32_t elen = ex.second - ex.first;
+						promo_total_exon_len += elen;
+						if (elen > promo_max_exon_len) promo_max_exon_len = elen;
+						if (elen < promo_min_exon_len) promo_min_exon_len = elen;
+					}
+
+					bool mew_valid = min_edge_weight[idx] >= 0;
+					bool mvw_valid = min_vertex_weight[idx] >= 0.0;
+					bool isz_valid = insert_sizes[idx] >= 0;
+
+					PromotionPoolEntry pool_entry;
+					pool_entry.idx = idx;
+					pool_entry.comp_num_circ = comp_num_circ;
+					double* f = pool_entry.f;
+					for (int fi = 0; fi < PROMOTION_MODEL_N_FEATURES; fi++)
+						f[fi] = 0.0;
+
+					f[PROMO_F_n_vertices] = (double)idx_to_path[idx].size();
+					f[PROMO_F_chimeric_support_reads] = (double)n_chim;
+					f[PROMO_F_outward_support_reads] = (double)n_outw;
+					f[PROMO_F_chimeric_support_weighted] = (double)chimeric_support[idx];
+					f[PROMO_F_outward_support_weighted] = (double)outward_support[idx];
+					f[PROMO_F_min_edge_weight] = mew_valid ? (double)min_edge_weight[idx] : 0.0;
+					f[PROMO_F_min_edge_weight_valid] = mew_valid ? 1.0 : 0.0;
+					f[PROMO_F_min_vertex_weight] = mvw_valid ? min_vertex_weight[idx] : 0.0;
+					f[PROMO_F_min_vertex_weight_valid] = mvw_valid ? 1.0 : 0.0;
+					f[PROMO_F_zero_coverage_vertices] = (double)zero_coverage_vertices[idx];
+					f[PROMO_F_insert_size] = isz_valid ? (double)insert_sizes[idx] : 0.0;
+					f[PROMO_F_insert_size_deviation] = isz_valid
+						? (double)abs(insert_sizes[idx] - (int32_t)length_median) : 0.0;
+					f[PROMO_F_insert_size_valid] = isz_valid ? 1.0 : 0.0;
+					f[PROMO_F_length_median] = (double)length_median;
+					f[PROMO_F_fragment_length] = (double)fragment_lengths[idx];
+					f[PROMO_F_total_exon_len] = (double)promo_total_exon_len;
+					f[PROMO_F_max_exon_len] = (double)promo_max_exon_len;
+					f[PROMO_F_min_exon_len] = (double)promo_min_exon_len;
+					f[PROMO_F_avg_exon_len] = (double)promo_total_exon_len / (double)promo_exons.size();
+					f[PROMO_F_weak_edge_count] = (double)weak_edge_count[idx];
+					f[PROMO_F_anchor_length] = (double)anchor_length[idx];
+					f[PROMO_F_bundle_expr_ceiling] = bundle_expr_ceiling;
+					f[PROMO_F_circ_ratio] = circ_ratio[idx];
+					f[PROMO_F_pre_gate_cc_size] = (double)pre_gate_cc_size[idx];
+					f[PROMO_F_inverted_repeat_matches] = (double)inverted_repeat_matches[idx];
+					f[PROMO_F_internal_junction_noncanonical_count] = (double)internal_junction_noncanonical_count[idx];
+					f[PROMO_F_fake_supple_count] = (double)fake_supple_count[idx];
+					f[PROMO_F_supple_len] = (double)supple_len[idx];
+					f[PROMO_F_distinct_chimeric_support] = (double)distinct_chimeric_support[idx];
+					f[PROMO_F_distinct_outward_support] = (double)distinct_outward_support[idx];
+					f[PROMO_F_exon_count] = (double)promo_exons.size();
+
+					// circrna_candidate_pool.tsv dumps circ_start shifted +1 (GTF
+					// convention) and circ_end unshifted, so the span the model was
+					// trained on is end - (start + 1). Reproduced exactly here.
+					double genomic_span = (double)circ_end[idx] - (double)(circ_start[idx] + 1);
+					f[PROMO_F_genomic_span] = genomic_span;
+					f[PROMO_F_exonic_frac] = (double)promo_total_exon_len / max(1.0, genomic_span);
+					f[PROMO_F_strand_undet] = (bd->bb.strand == '.') ? 1.0 : 0.0;
+
+					double tot_support = (double)(n_chim + n_outw);
+					double tot_distinct = (double)(distinct_chimeric_support[idx] + distinct_outward_support[idx]);
+					f[PROMO_F_tot_support] = tot_support;
+					f[PROMO_F_tot_distinct] = tot_distinct;
+					f[PROMO_F_dup_ratio] = tot_distinct / max(1.0, tot_support);
+					f[PROMO_F_has_chim] = (n_chim > 0) ? 1.0 : 0.0;
+					f[PROMO_F_has_outw] = (n_outw > 0) ? 1.0 : 0.0;
+					f[PROMO_F_fake_frac] = (double)fake_supple_count[idx] / max(1.0, (double)n_chim);
+					f[PROMO_F_edge_per_vert] = f[PROMO_F_min_edge_weight] / max(1.0, f[PROMO_F_min_vertex_weight]);
+					f[PROMO_F_support_over_ceiling] = tot_support / max(1.0, bundle_expr_ceiling);
+					f[PROMO_F_insert_dev_rel] = f[PROMO_F_insert_size_deviation] / max(1.0, f[PROMO_F_insert_size]);
+					f[PROMO_F_len_vs_median] = (double)promo_total_exon_len / max(1.0, (double)length_median);
+					f[PROMO_F_bundle_size] = pool_bundle_size[idx];
+					f[PROMO_F_support_rank_in_bundle] = pool_support_rank[idx];
+					f[PROMO_F_bsj_group_size] = pool_bsj_group_size[idx];
+
+					map<int, PromotionTrack>::const_iterator tit = promo_track.find(idx);
+					if (tit != promo_track.end())
+					{
+						const PromotionTrack& tr = tit->second;
+						f[PROMO_F_sel_n_rounds] = (double)tr.n_rounds;
+						f[PROMO_F_sel_min_iter] = (double)tr.min_iter;
+						f[PROMO_F_sel_max_iter] = (double)tr.max_iter;
+						f[PROMO_F_sel_ever_winner] = (double)tr.ever_winner;
+						f[PROMO_F_sel_unexp_chim_max] = (double)tr.unexp_chim_max;
+						f[PROMO_F_sel_unexp_outw_max] = (double)tr.unexp_outw_max;
+						f[PROMO_F_sel_best_margin] = tr.best_margin;
+						f[PROMO_F_sel_min_round_size] = (double)tr.min_round_size;
+
+						if (tr.gate == "evidence") f[PROMO_F_gate_evidence] = 1.0;
+						else if (tr.gate == "splice_signal") f[PROMO_F_gate_splice_signal] = 1.0;
+						else if (tr.gate == "structural") f[PROMO_F_gate_structural] = 1.0;
+						else if (tr.gate == "contig") f[PROMO_F_gate_contig] = 1.0;
+					}
+
+					// Structural features (69-71): internal (non-BSJ) junction count
+					// and non-canonical fraction within this candidate's own exon
+					// chain, and the coefficient of variation of its exon lengths.
+					// Neither depends on the bundle's final emitted set, so (unlike
+					// 60-68) they're safe to fill in here rather than at the deferred
+					// scoring point below. Reuses internal_junction_noncanonical_count
+					// (already computed against bd->bb.strand for every candidate --
+					// see its own definition above) as the numerator rather than
+					// recomputing it, so the two stay identical by construction.
+					int n_internal_junc = ((int)promo_exons.size() > 1) ? (int)promo_exons.size() - 1 : 0;
+					f[PROMO_F_x_n_internal_junc] = (double)n_internal_junc;
+					f[PROMO_F_x_noncanon_frac] = (n_internal_junc > 0)
+						? (double)internal_junction_noncanonical_count[idx] / (double)n_internal_junc
+						: 0.0;
+
+					if (promo_exons.size() >= 2)
+					{
+						double mean_len = (double)promo_total_exon_len / (double)promo_exons.size();
+						double var_sum = 0.0;
+						for (const pair<int32_t, int32_t>& ex : promo_exons)
+						{
+							double d = (double)(ex.second - ex.first) - mean_len;
+							var_sum += d * d;
+						}
+						double sd = sqrt(var_sum / (double)promo_exons.size());
+						f[PROMO_F_x_exon_len_cv] = (mean_len > 0.0) ? (sd / mean_len) : 0.0;
+					}
+					else
+					{
+						f[PROMO_F_x_exon_len_cv] = 0.0;
+					}
+
+					// Boundary motif features (72-78): direct presence checks at the
+					// two BSJ boundary positions (see promo_boundary_motif_features's
+					// own definition above).
+					promo_boundary_motif_features(bd, circ_start[idx], circ_end[idx], f);
+
+					promotion_pool_all.push_back(pool_entry);
+				}
 			}
 
 			total_selected += selected.size();
 			comp_num_circ++;
 		}
 
+		// Bundle-wide cross-connected-component / cross-iteration same-outer-boundary
+		// duplicate reduction (see the comment at bundle_wide_selected's declaration
+		// above for the full mechanism). Groups every winner accumulated across every
+		// component of this bundle by its exact (circ_start, circ_end) -- the same
+		// key pick_best_ranked()'s own same-boundary pre-reduction already uses -- and
+		// keeps the max-min_edge_weight member of each group. A non-max sibling is only
+		// actually dropped if its OWN min_edge_weight fails min_junction_count (the
+		// pipeline's existing, already-established "is this edge trustworthy at all"
+		// bar, not a new invented number): real ground-truth-labeled data on this exact
+		// build showed this floor-scoped rule resolves true-vs-false conflicts more
+		// accurately than an unconditional reduction (1,324/1,366 vs 1,180/1,366) while
+		// protecting genuine same-boundary isoform diversity that the ground-truth GTF
+		// itself confirms is real (3,545 annotated multi-isoform boundaries genome-
+		// wide) -- an unconditional reduction cost 625 real TPs in that same check,
+		// this floor-scoped version cost only 107+42=149.
 		vector<bool> keep_bundle_wide(bundle_wide_selected.size(), true);
 		vector<string> bundle_wide_drop_reason(bundle_wide_selected.size(), "");
 		{
@@ -3887,6 +4992,13 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 				for (int i : g.second)
 				{
 					if (i == best_i) continue;
+					// Cross-tissue reproducibility rescue (same signal/rationale as the
+					// evidence-gate and structural-gate rescues above): a non-max sibling
+					// that would otherwise be dropped for a weak min_edge_weight is kept
+					// anyway if its exact exon chain independently reproduces in >=2 other
+					// tissues' own pools. Real labeled data: this drop population is 19.0%
+					// true overall vs 41.7% once cross_tissue_repro_full_count>=2 -- above
+					// the pipeline's overall precision once rescued.
 					if (min_edge_weight[bundle_wide_selected[i].idx] < min_junction_count
 						&& cross_tissue_repro_full_count[bundle_wide_selected[i].idx] < 2)
 					{
@@ -3994,6 +5106,259 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 			feat_out << "\n";
 		}
 
+		// Deferred PROMOTION scoring (see the PromotionTrack/PromotionPoolEntry/
+		// bundle_wide_promoted declarations above for the full rationale). Every CC
+		// in this bundle has now collected its never-selected, splice-signal-passing
+		// candidates into promotion_pool_all, and keep_bundle_wide directly above has
+		// finished reducing bundle_wide_selected to this bundle's TRUE final winner
+		// set -- exactly the point the bundle-emission-relation features (60-66) need
+		// to observe, not an in-progress per-CC snapshot.
+		{
+			// This bundle's final emitted BSJs (winners only -- a keep_bundle_wide==
+			// false entry was dropped and is not "emitted"), for features
+			// PROMO_F_x_bsj_emitted..PROMO_F_x_span_overlap_emit below. A candidate's
+			// merged exon span always runs exactly from circ_start[idx] to
+			// circ_end[idx] by construction (see where circ_start/circ_end are first
+			// assigned above), so no separate span bookkeeping is needed here.
+			struct EmittedBsjInfo
+			{
+				int32_t start;
+				int32_t end;
+			};
+			vector<EmittedBsjInfo> emitted_bsjs;
+			map<pair<int32_t, int32_t>, int> emitted_bsjgrp_counts;
+			for (int i = 0; i < (int)bundle_wide_selected.size(); i++)
+			{
+				if (!keep_bundle_wide[i]) continue;
+				int eidx = bundle_wide_selected[i].idx;
+				emitted_bsjs.push_back({circ_start[eidx], circ_end[eidx]});
+				emitted_bsjgrp_counts[{circ_start[eidx], circ_end[eidx]}]++;
+			}
+
+			for (PromotionPoolEntry& pe : promotion_pool_all)
+			{
+				int idx = pe.idx;
+				double* f = pe.f;
+				int32_t my_start = circ_start[idx];
+				int32_t my_end = circ_end[idx];
+
+				int bsj_emitted = 0, start_emitted = 0, end_emitted = 0, span_overlap = 0;
+				double nearest_dist = -1.0;
+				for (const EmittedBsjInfo& e : emitted_bsjs)
+				{
+					if (e.start == my_start && e.end == my_end) bsj_emitted = 1;
+					if (e.start == my_start) start_emitted = 1;
+					if (e.end == my_end) end_emitted = 1;
+					// Genomic span overlap: this candidate's [circ_start, circ_end]
+					// interval against the emitted winner's own.
+					if (my_start <= e.end && e.start <= my_end) span_overlap = 1;
+
+					// Distance between two BSJs, treated as points in the
+					// (circ_start, circ_end) plane: Manhattan distance between the
+					// two boundary-coordinate pairs. 0 exactly when bsj_emitted == 1.
+					int32_t d_start = e.start - my_start; if (d_start < 0) d_start = -d_start;
+					int32_t d_end = e.end - my_end; if (d_end < 0) d_end = -d_end;
+					double d = (double)d_start + (double)d_end;
+					if (nearest_dist < 0.0 || d < nearest_dist) nearest_dist = d;
+				}
+
+				f[PROMO_F_x_bsj_emitted] = (double)bsj_emitted;
+				f[PROMO_F_x_start_emitted] = (double)start_emitted;
+				f[PROMO_F_x_end_emitted] = (double)end_emitted;
+				f[PROMO_F_x_bsjgrp_n_emitted] = (double)emitted_bsjgrp_counts[{my_start, my_end}];
+				f[PROMO_F_x_n_emitted_in_bundle] = (double)emitted_bsjs.size();
+				f[PROMO_F_x_dist_nearest_emit] = (nearest_dist < 0.0) ? 0.0 : nearest_dist;
+				f[PROMO_F_x_span_overlap_emit] = (double)span_overlap;
+
+				// BSJ-group standing (67-68), computed once per bundle over the whole
+				// pre-gate pool -- see its own declaration above.
+				f[PROMO_F_x_bsjgrp_sup_rank] = pool_bsjgrp_sup_rank[idx];
+				f[PROMO_F_x_bsjgrp_is_top] = pool_bsjgrp_is_top[idx];
+
+				double p = promotion_probability(f);
+				if (p >= PROMOTION_THRESHOLD)
+					bundle_wide_promoted.push_back({idx, pe.comp_num_circ, p});
+			}
+		}
+
+		// Emission of this bundle's PROMOTED candidates (see the promotion pass and
+		// the PromotionTrack declaration above). Written after every normally-
+		// selected winner of this bundle, and deliberately held OUT of the
+		// keep_bundle_wide same-outer-boundary reduction above: a promotion must
+		// never be able to displace a real winner from its own boundary group, which
+		// is exactly what letting it into that group's max-min_edge_weight contest
+		// would allow.
+		//
+		// The only cross-check applied is an exact exon-chain de-duplication against
+		// what this bundle already emitted (and against earlier promotions), so a
+		// promotion can never introduce a duplicate record.
+		//
+		// Provenance, using the mechanisms already present rather than new ones:
+		//   - circrna_diagnostics.tsv gets a row with gate_result == "promoted", at
+		//     iteration 0 -- a value the greedy loop itself never produces (its
+		//     iterations start at 1), so it can never collide with a real round, and
+		//     evaluate/'s cross_cc_duplicate parser ignores it.
+		//   - terrace_2.0.gtf carries a promoted "1" attribute and a "PROMO." prefix on
+		//     transcript_id. Neither affects the chain hash every scorer matches on.
+		//   - circrna_paths.txt groups them under a synthetic "CC 0" block; real
+		//     connected-component numbering starts at 1, so the (bundle, CC, rank)
+		//     identity evaluate/evaluate_by_support_category.py builds cannot collide
+		//     with a dropped winner's.
+		// Support-category assignment itself is untouched: a promoted candidate is
+		// classified by its Chimeric/Outward Support exactly like any other record.
+		{
+			set<string> already_emitted_chains;
+			for (int i = 0; i < (int)bundle_wide_selected.size(); i++)
+			{
+				if (!keep_bundle_wide[i]) continue;
+				already_emitted_chains.insert(promotion_chain_key(
+					merge_path_to_exons(bd, idx_to_path[bundle_wide_selected[i].idx])));
+			}
+
+			vector<int> promoted_keep;
+			for (int i = 0; i < (int)bundle_wide_promoted.size(); i++)
+			{
+				string key = promotion_chain_key(
+					merge_path_to_exons(bd, idx_to_path[bundle_wide_promoted[i].idx]));
+
+				if (already_emitted_chains.count(key)) continue;
+
+				already_emitted_chains.insert(key);
+				promoted_keep.push_back(i);
+			}
+
+			if (!promoted_keep.empty())
+			{
+				circ_out << "CC 0 (" << promoted_keep.size() << " Promoted Path"
+				         << (promoted_keep.size() == 1 ? ")" : "s)") << "\n";
+				circ_out << "---------------------------------\n";
+			}
+
+			for (int rank = 0; rank < (int)promoted_keep.size(); rank++)
+			{
+				const PromotedEntry& pe = bundle_wide_promoted[promoted_keep[rank]];
+				int idx = pe.idx;
+				int ni = old_to_new[idx];
+
+				vector<pair<int32_t, int32_t>> exons = merge_path_to_exons(bd, idx_to_path[idx]);
+				const set<string>& promo_chim = path_chim_reads[idx];
+				const set<string>& promo_out = path_outward_reads[idx];
+				int support = (int)(promo_chim.size() + promo_out.size());
+
+				circ_out << "  Rank " << rank + 1 << ": P" << ni + 1 << " = (";
+				for (int j = 0; j < idx_to_path[idx].size(); j++)
+				{
+					circ_out << idx_to_path[idx][j];
+					if (j + 1 < idx_to_path[idx].size())
+						circ_out << " → ";
+				}
+				circ_out << ")\n";
+
+				circ_out << "    Promoted          = " << pe.probability << " (CC " << pe.comp_num_circ << ")\n";
+				circ_out << "    Chimeric Support  = " << promo_chim.size() << "\n";
+				circ_out << "    Outward Support   = " << promo_out.size() << "\n";
+
+				circ_out << "    Min Edge Weight   = ";
+				if (min_edge_weight[idx] >= 0) circ_out << min_edge_weight[idx];
+				else circ_out << "N/A";
+				circ_out << "\n";
+
+				circ_out << "    Insert Size       = " << insert_sizes[idx] << " (|deviation| = ";
+				if (insert_sizes[idx] >= 0) circ_out << abs(insert_sizes[idx] - length_median);
+				else circ_out << "N/A";
+				circ_out << ")\n";
+
+				circ_out << "    Full-Seq Length   = " << fragment_lengths[idx] << "\n";
+
+				circ_out << "    Chimeric Reads (" << promo_chim.size() << "): [";
+				bool first_pc = true;
+				for (const string& r : promo_chim)
+				{
+					if (!first_pc) circ_out << ", ";
+					circ_out << r;
+					first_pc = false;
+				}
+				circ_out << "]\n";
+
+				circ_out << "    Outward Reads  (" << promo_out.size() << "): [";
+				bool first_po = true;
+				for (const string& r : promo_out)
+				{
+					if (!first_po) circ_out << ", ";
+					circ_out << r;
+					first_po = false;
+				}
+				circ_out << "]\n\n";
+
+				diag_out << bundle_idx << "\t" << pe.comp_num_circ << "\t0\t"
+				         << idx << "\t" << bd->bb.chrm << "\t" << bd->bb.strand << "\t"
+				         << circ_start[idx] << "\t" << circ_end[idx] << "\t" << idx_to_path[idx].size() << "\t"
+				         << promo_chim.size() << "\t" << promo_out.size() << "\t";
+
+				if (min_edge_weight[idx] >= 0) diag_out << min_edge_weight[idx]; else diag_out << "NA";
+				diag_out << "\t";
+				if (min_vertex_weight[idx] >= 0.0) diag_out << min_vertex_weight[idx]; else diag_out << "NA";
+				diag_out << "\t";
+				if (insert_sizes[idx] >= 0)
+					diag_out << insert_sizes[idx] << "\t" << abs(insert_sizes[idx] - (int32_t)length_median);
+				else
+					diag_out << "NA\tNA";
+				diag_out << "\tpromoted\n";
+
+				string tid = "PROMO.";
+				bool first_tid = true;
+				for (const string& r : promo_chim)
+				{
+					if (!first_tid) tid += "|";
+					tid += r;
+					first_tid = false;
+				}
+				for (const string& r : promo_out)
+				{
+					if (!first_tid) tid += "|";
+					tid += r;
+					first_tid = false;
+				}
+
+				gtf_out << bd->bb.chrm << "\tTERRACE_2.0\tcircRNA\t"
+				        << (exons.front().first + 1) << "\t" << exons.back().second << "\t"
+				        << support << "\t" << bd->bb.strand << "\t.\t"
+				        << "gene_id \"gene\"; "
+				        << "transcript_id \"" << tid << "\"; "
+				        << "cov \"" << support << "\"; "
+				        << "promoted \"1\";\n";
+
+				for (int ei = 0; ei < exons.size(); ei++)
+				{
+					gtf_out << bd->bb.chrm << "\tTERRACE_2.0\texon\t"
+					        << (exons[ei].first + 1) << "\t" << exons[ei].second << "\t"
+					        << support << "\t" << bd->bb.strand << "\t.\t"
+					        << "gene_id \"gene\"; "
+					        << "transcript_id \"" << tid << "\"; "
+					        << "exon_number \"" << (ei + 1) << "\"; "
+					        << "promoted \"1\";\n";
+				}
+
+				feat_out << tid << "\t" << bd->bb.chrm << "\t" << bd->bb.strand << "\t"
+				         << (exons.front().first + 1) << "\t" << exons.back().second << "\t"
+				         << idx_to_path[idx].size() << "\t"
+				         << promo_chim.size() << "\t" << promo_out.size() << "\t";
+
+				if (min_edge_weight[idx] >= 0) feat_out << min_edge_weight[idx]; else feat_out << "NA";
+				feat_out << "\t";
+				if (min_vertex_weight[idx] >= 0.0) feat_out << min_vertex_weight[idx]; else feat_out << "NA";
+				feat_out << "\t";
+				if (insert_sizes[idx] >= 0)
+					feat_out << insert_sizes[idx] << "\t" << abs(insert_sizes[idx] - (int32_t)length_median);
+				else
+					feat_out << "NA\tNA";
+				feat_out << "\n";
+			}
+
+			if (!promoted_keep.empty())
+				circ_out << "Total Promoted circRNA Paths: " << promoted_keep.size() << "\n\n";
+		}
+
 		circ_out << "Total Selected circRNA Paths: " << total_selected << "\n\n\n";
 		circ_out.close();
 		gtf_out.close();
@@ -4014,17 +5379,41 @@ int bridger::print_splice_graph()
 	collect_bundle_reads(current_bundle_index);
 
 	// NO USEFUL INFORMATION IF NEITHER CHIMERIC READS NOR OUTWARD READS IN BUNDLE
-	if (bundle_chimeric_reads[current_bundle_index].empty() && bundle_outward_reads[current_bundle_index].empty()) return 0;
+	if (bundle_chimeric_reads[current_bundle_index].empty() && bundle_outward_reads[current_bundle_index].empty())
+	{
+		bundle_chimeric_reads.erase(current_bundle_index);
+		bundle_outward_reads.erase(current_bundle_index);
+		return 0;
+	}
 
+	// Each run gets its own uniquely-named directory so an in-progress run's
+	// files can never be overwritten by a later run -- this static is computed
+	// once per process and reused for every bundle. Two distinct namespaces,
+	// never mixed: a lone/manual run (no --results_tag) gets the original
+	// results_YYYYMMDD_HHMMSS naming, since a single tissue has nothing to
+	// stay in sync with and a bare v<N> here would be ambiguous about which
+	// multi-tissue run (if any) it lines up with. A run launched by one of
+	// the run_all_*.sh wrapper scripts always passes --results_tag with one
+	// value computed once and shared across all 8 parallel per-tissue
+	// processes, so they land on an identically-named v<N> directory --
+	// that synchronization can only be done by the orchestrating script, not
+	// self-detected by each process independently.
 	static std::string outdir;
 	static bool dir_created = false;
 
 	if (!dir_created)
 	{
-		time_t now = time(nullptr);
-		char buf[32];
-		strftime(buf, sizeof(buf), "results_%Y%m%d_%H%M%S", localtime(&now));
-		outdir = buf;
+		if (!results_tag.empty())
+		{
+			outdir = results_tag;
+		}
+		else
+		{
+			time_t now = time(nullptr);
+			char buf[32];
+			strftime(buf, sizeof(buf), "results_%Y%m%d_%H%M%S", localtime(&now));
+			outdir = buf;
+		}
 		mkdir(outdir.c_str(), 0755);
 
 		dir_created = true;
@@ -4053,6 +5442,23 @@ int bridger::print_splice_graph()
 		bg[e.first].insert(bg[e.first].end(), e.second.begin(), e.second.end());
 
 	write_bipartite_graph_file(current_bundle_index, outdir, chim_bg, outward_bg, bg, chim_rep_members, outward_rep_members);
+
+	// This bundle's candidate generation, selection, and emission are now
+	// complete -- every read of these seven bundle_idx-keyed maps happens
+	// inside write_bipartite_graph_file() (and the write_*/build_outward_
+	// read_paths calls above it), all called synchronously from this same
+	// function for this same current_bundle_index, never revisited by any
+	// later bundle. Without this, all seven grow for the entire lifetime of
+	// the process (confirmed: not erased anywhere else in this file) --
+	// on a full-genome run with 100,000+ bundles this is an unbounded
+	// memory leak, unrelated to any single bundle's own difficulty.
+	bundle_chimeric_reads.erase(current_bundle_index);
+	bundle_outward_reads.erase(current_bundle_index);
+	bundle_chimeric_bsj.erase(current_bundle_index);
+	bundle_chimeric_support_names.erase(current_bundle_index);
+	bundle_chimeric_support_paths.erase(current_bundle_index);
+	bundle_outward_bsj_paths.erase(current_bundle_index);
+	bundle_chimeric_merged_paths.erase(current_bundle_index);
 
 	return 0;
 }
