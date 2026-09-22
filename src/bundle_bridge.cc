@@ -2335,6 +2335,7 @@ int bundle_bridge::remove_tiny_boundary(hit &h1)
 {
 	vector<int> v1 = decode_vlist(h1.vlist);
 	int n1 = v1.size();
+	bool modified = false;
 	if(n1 >= 2 && v1[n1 - 2] + 1 == v1[n1 - 1])
 	{
 		int k = v1[n1 - 1];
@@ -2348,10 +2349,16 @@ int bundle_bridge::remove_tiny_boundary(hit &h1)
 			h1.vlist = encode_vlist(v);
 			h1.tiny_boundary = abs(h1.rpos-regions[k].lpos);
 			h1.rpos = regions[k].lpos;
+			modified = true;
 		}
 	}
 
-	vector<int> v2 = decode_vlist(h1.vlist);
+	// h1.vlist is unchanged from what v1 already decoded unless the block
+	// above just modified it -- decode_vlist is a pure function of its input,
+	// so reuse v1 instead of redundantly redecoding the same bytes a second
+	// time. This function runs once per raw hit in the bundle (up to 11M+
+	// for liver's ALB locus), so this halves its decode cost exactly.
+	vector<int> v2 = modified ? decode_vlist(h1.vlist) : v1;
 	int n2 = v2.size();
 	if(n2 >= 2 && v2[0] + 1 == v2[1])
 	{

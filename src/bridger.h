@@ -14,6 +14,7 @@ See LICENSE for licensing.
 #include "bundle_bridge.h"
 #include "fcluster.h"
 #include <map>
+#include <unordered_map>
 #include <vector>
 #include <utility>
 #include <string>
@@ -22,6 +23,25 @@ See LICENSE for licensing.
 #include <tuple> // Added for storing support info
 
 using namespace std;
+
+// Hash functor for vector<int> map keys (std::hash has no vector
+// specialization pre-C++17). Used only by bridger::build_path_nodes' window-
+// count map: every live reader of pnodes (see build_path_nodes' own comment)
+// only feeds (x,y) pairs into downstream map/set containers keyed by (x,y),
+// so the order pnodes is built in never affects any executed code path --
+// verified by tracing every consumer, the order-dependent ones are all
+// unreachable (inside commented-out blocks, or gated by use_overlap_scoring,
+// a bool that is declared false in config.cc and never assigned elsewhere).
+struct VectorIntHash
+{
+	size_t operator()(const vector<int> &v) const
+	{
+		size_t seed = v.size();
+		for(size_t i = 0; i < v.size(); i++)
+			seed ^= std::hash<int>()(v[i]) + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+		return seed;
+	}
+};
 
 struct read_info {
     string qname;
@@ -112,10 +132,10 @@ public:
 	int build_junction_graph(vector<fragment> &frags);
 	int print_splice_graph();
 	void write_splice_graph(std::ofstream& fout);
-	void write_chimeric_read_paths(int bundle_idx, const std::string& outdir);
-	void write_simplified_chimeric_paths(int bundle_idx, const std::string& outdir);
-	void write_chimeric_insert_sizes(int bundle_idx, const std::string& outdir);
-	void build_outward_read_paths(int bundle_idx, const std::string& outdir);
+	void write_chimeric_read_paths(int bundle_idx, const std::string& outdir, const map<string, vector<read_info>>& grouped_chimeric);
+	void write_simplified_chimeric_paths(int bundle_idx, const std::string& outdir, const map<string, vector<read_info>>& grouped_chimeric);
+	void write_chimeric_insert_sizes(int bundle_idx, const std::string& outdir, const map<string, vector<read_info>>& grouped_chimeric);
+	void build_outward_read_paths(int bundle_idx, const std::string& outdir, const map<string, vector<read_info>>& grouped_outward);
 	void write_simplified_outward_paths(int bundle_idx, const std::string& outdir);
 	map<string, vector<vector<int>>> build_chimeric_bg(int bundle_idx, map<string, vector<string>>& rep_members);
 	map<string, vector<vector<int>>> build_outward_bg(int bundle_idx, map<string, vector<string>>& rep_members);
@@ -153,7 +173,7 @@ public:
 	int build_path_nodes(vector<fragment> &frags);
 	int build_path_nodes(int max_len, vector<fragment> &frags);
 	int build_path_nodes(int low, int high, vector<fragment> &fragments);
-	int build_path_nodes(map<vector<int>, int> &m, const vector<int> &v, int cnt);
+	int build_path_nodes(unordered_map<vector<int>, int, VectorIntHash> &m, const vector<int> &v, int cnt);
 	int add_consecutive_path_nodes();
 	int adjust_path_score(path &p);
 

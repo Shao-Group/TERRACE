@@ -17,6 +17,7 @@ See LICENSE for licensing.
 #include <iostream>
 #include <algorithm>
 #include <set>
+#include <unordered_set>
 #include <climits>
 #include <cfloat>
 #include <queue>
@@ -792,7 +793,7 @@ void bridger::write_splice_graph(std::ofstream& fout)
 	}
 }
 
-void bridger::write_chimeric_read_paths(int bundle_idx, const std::string& outdir)
+void bridger::write_chimeric_read_paths(int bundle_idx, const std::string& outdir, const map<string, vector<read_info>>& grouped_chimeric)
 {
     std::string chim_filename = outdir + "/chimeric_possible_configs.txt";
     std::ofstream cfout(chim_filename, std::ios_base::app);
@@ -806,12 +807,29 @@ void bridger::write_chimeric_read_paths(int bundle_idx, const std::string& outdi
     write_splice_graph(cfout);
     cfout << "\n";
 
-    map<string, vector<read_info>> grouped_chimeric;
-    for (const read_info& read : bundle_chimeric_reads[bundle_idx])
-        grouped_chimeric[read.qname].push_back(read);
-
     cfout << "Chimeric Reads (" << grouped_chimeric.size() << ")\n";
     cfout << "---------------------------------\n";
+
+    // Per-bundle memoization of find_pareto_paths, identical to the pattern
+    // build_outward_read_paths already uses (bridger.cc, cached_pareto/
+    // pareto_cache) with the same correctness argument: find_pareto_paths is
+    // a pure function of (start,end,len_cap,canon) plus splice_graph_adj/
+    // bd->regions, both fixed for the duration of this one bundle's call --
+    // identical inputs are guaranteed identical results. Many distinct
+    // qnames (not just PCR duplicates) resolve to the same (v_back,v_front)
+    // gap endpoints in a dense bundle, so this DP search was being re-run
+    // from scratch for each one; the outward lane already had this fix, the
+    // chimeric lane below did not.
+    map<tuple<int,int,int32_t,bool>, vector<CandidatePath>> chim_pareto_cache;
+    auto cached_chim_pareto = [&](int s, int e, int32_t cap, bool canon) -> vector<CandidatePath>
+    {
+        tuple<int,int,int32_t,bool> key(s, e, cap, canon);
+        map<tuple<int,int,int32_t,bool>, vector<CandidatePath>>::iterator it = chim_pareto_cache.find(key);
+        if (it != chim_pareto_cache.end()) return it->second;
+        vector<CandidatePath> result = find_pareto_paths(s, e, cap, canon);
+        chim_pareto_cache[key] = result;
+        return result;
+    };
 
     // Builds bridging candidates from a specific variant of a qname's segment list (sorted by
     // position, gaps bridged via find_pareto_paths, Cartesian product across gaps), pushing
@@ -904,7 +922,7 @@ void bridger::write_chimeric_read_paths(int bundle_idx, const std::string& outdi
 			}
             else
 			{
-				bridges[i] = find_pareto_paths(v_back, v_front, -1, true);
+				bridges[i] = cached_chim_pareto(v_back, v_front, -1, true);
 				// find_pareto_paths(a, a, ...) always returns a non-empty seeded set, so an empty
 				// result here can only mean v_back < v_front and genuinely unreachable in the
 				// splice graph -- not a BSJ crossing. Splicing the segments together anyway would
@@ -968,7 +986,7 @@ void bridger::write_chimeric_read_paths(int bundle_idx, const std::string& outdi
 			return true;
     };
 
-    for (pair<const string, vector<read_info>>& chim_entry : grouped_chimeric)
+    for (const pair<const string, vector<read_info>>& chim_entry : grouped_chimeric)
     {
         const vector<read_info>& all_reads_for_qname = chim_entry.second;
 
@@ -1026,7 +1044,7 @@ void bridger::write_chimeric_read_paths(int bundle_idx, const std::string& outdi
 
 }
 
-void bridger::write_simplified_chimeric_paths(int bundle_idx, const std::string& outdir)
+void bridger::write_simplified_chimeric_paths(int bundle_idx, const std::string& outdir, const map<string, vector<read_info>>& grouped_chimeric)
 {
     std::string simplify_chim_filename = outdir + "/simplify_chimeric_full_sequence_paths.txt";
     std::ofstream scfout(simplify_chim_filename, std::ios_base::app);
@@ -1044,12 +1062,14 @@ void bridger::write_simplified_chimeric_paths(int bundle_idx, const std::string&
             scfout << qname << "\n";
             scfout << "---------------------------------\n";
 
+            // Was a full scan of bundle_chimeric_reads[bundle_idx] per qname here (O(N) per
+            // qname, O(N*M) total for M qnames in this bundle) -- grouped_chimeric (built once
+            // in process_bundle() from that same source, in that same vector order) gives O(log
+            // N) access to exactly this qname's own reads, same reads, same relative order.
             vector<read_info> segs;
-            for (const read_info& read : bundle_chimeric_reads[bundle_idx])
-            {
-                if (read.qname == qname)
-                    segs.push_back(read);
-            }
+            map<string, vector<read_info>>::const_iterator git = grouped_chimeric.find(qname);
+            if (git != grouped_chimeric.end())
+                segs = git->second;
 
             sort(
 				segs.begin(), segs.end(), [](const read_info& a, const read_info& b)
@@ -1328,14 +1348,10 @@ static int compute_chimeric_insert_size(const vector<int>& path, int frag_start,
 // The "single" read S (the mate with exactly one alignment) sets the traversal direction.
 // Starting from S's entry end, we travel along the circular path: we cross T_first (the first T alignment encountered) and continue to T_second (the second), stopping at T_second's far end.
 // The total exon length of this traversal is the insert size.
-void bridger::write_chimeric_insert_sizes(int bundle_idx, const std::string& outdir)
+void bridger::write_chimeric_insert_sizes(int bundle_idx, const std::string& outdir, const map<string, vector<read_info>>& grouped_chimeric)
 {
-    map<string, vector<read_info>> grouped;
-    for (const read_info& read : bundle_chimeric_reads[bundle_idx])
-        grouped[read.qname].push_back(read);
-
     bool has_output = false;
-    for (const pair<const string, vector<read_info>>& e : grouped)
+    for (const pair<const string, vector<read_info>>& e : grouped_chimeric)
     {
         for (const read_info& r : e.second)
         {
@@ -1358,9 +1374,12 @@ void bridger::write_chimeric_insert_sizes(int bundle_idx, const std::string& out
     fout << "Bundle " << bundle_idx << "\n";
     fout << "=================================================\n\n";
 
-    for (pair<const string, vector<read_info>>& chim_entry : grouped)
+    for (const pair<const string, vector<read_info>>& chim_entry : grouped_chimeric)
     {
-        vector<read_info>& reads = chim_entry.second;
+        // Local copy (not a reference into the now-shared, const grouped_chimeric map) since
+        // this loop sorts by position below -- identical result to sorting in place, since sort
+        // output depends only on content, not container identity.
+        vector<read_info> reads = chim_entry.second;
 
         bool has_suppl = false;
         for (const read_info& r : reads)
@@ -1564,10 +1583,16 @@ void bridger::write_simplified_outward_paths(int bundle_idx, const std::string& 
 map<string, vector<vector<int>>> bridger::build_chimeric_bg(int bundle_idx, map<string, vector<string>>& rep_members)
 {
     rep_members.clear();
-    map<string, vector<vector<int>>> chim_bg;
-	map<int, map<string, vector<vector<int>>>>::iterator it = bundle_chimeric_merged_paths.find(bundle_idx);
-	if (it != bundle_chimeric_merged_paths.end())
-		chim_bg = it->second;
+    // Was a full deep copy of bundle_chimeric_merged_paths[bundle_idx] --
+    // itself the single largest live structure for a dense bundle (liver's
+    // ALB locus). Never mutated below (only ever iterated, both here and at
+    // the consolidation loop further down), so a const reference is exactly
+    // equivalent and avoids doubling this structure's peak memory footprint
+    // for the duration of this function call. Same class of fix as the
+    // bg-triple-copy elimination above (bridger.cc's write_bipartite_graph_file).
+    static const map<string, vector<vector<int>>> empty_chim_bg;
+    map<int, map<string, vector<vector<int>>>>::iterator it = bundle_chimeric_merged_paths.find(bundle_idx);
+    const map<string, vector<vector<int>>>& chim_bg = (it != bundle_chimeric_merged_paths.end()) ? it->second : empty_chim_bg;
 
 	map<string, vector<read_info>> chim_segs_map;
 	for (const read_info& r : bundle_chimeric_reads[bundle_idx])
@@ -1616,17 +1641,39 @@ map<string, vector<vector<int>>> bridger::build_chimeric_bg(int bundle_idx, map<
 		}
 	}
 
+	// Every raw qname mapped to the same representative shares an identical
+	// SegKey (pos/rpos/vlist per segment), and in the overwhelming common
+	// case (true PCR duplicates of one original fragment) that means
+	// process_chimeric_variant -- itself a pure function of exactly that
+	// data -- produces a byte-identical path list for every member. But that
+	// is NOT provable in full generality: process_chimeric_variant's fallback
+	// branch (bridger.cc ~1007-1019) additionally depends on which mate carries
+	// the supplementary flag, which SegKey does not capture, so two same-key
+	// qnames COULD in principle diverge. Rather than assume identity, dedupe
+	// the accumulated multiset of paths per representative directly (order-
+	// preserving: keep first occurrence, drop exact repeats) -- this is exactly
+	// equivalent regardless of whether members' lists happen to match, because
+	// every downstream reader of chim_bg (idx_to_path's path_to_idx dedup,
+	// the *_support counters' seen_for_qname dedup, path_supporters' seen-idx
+	// dedup) already only reacts to a path's FIRST appearance in this same
+	// per-representative bag and ignores repeats -- so removing repeats here
+	// changes nothing they see, just the storage cost of holding them. This
+	// was confirmed (live profiling) to be a dominant driver of liver's
+	// ALB-locus memory blowup, where a single representative can have
+	// thousands of raw PCR-duplicate members.
 	map<string, vector<vector<int>>> consolidated_chim_bg;
+	unordered_map<string, unordered_set<vector<int>, VectorIntHash>> seen_paths_per_rep;
 	for (const pair<const string, vector<vector<int>>>& qname_entry : chim_bg)
 	{
 		const string& rep = chim_rep_map[qname_entry.first];
-		consolidated_chim_bg[rep].insert(consolidated_chim_bg[rep].end(), qname_entry.second.begin(), qname_entry.second.end());
+		unordered_set<vector<int>, VectorIntHash>& seen = seen_paths_per_rep[rep];
+		for (const vector<int>& path : qname_entry.second)
+			if (seen.insert(path).second)
+				consolidated_chim_bg[rep].push_back(path);
 		rep_members[rep].push_back(qname_entry.first);
 	}
 
-	chim_bg = consolidated_chim_bg;
-
-    return chim_bg;
+    return consolidated_chim_bg;
 }
 
 map<string, vector<vector<int>>> bridger::build_outward_bg(int bundle_idx, map<string, vector<string>>& rep_members)
@@ -1638,33 +1685,42 @@ map<string, vector<vector<int>>> bridger::build_outward_bg(int bundle_idx, map<s
         map<int, map<string, map<pair<int32_t,int32_t>, vector<vector<int>>>>>::iterator bundle_it_bg = bundle_outward_bsj_paths.find(bundle_idx);
         if (bundle_it_bg != bundle_outward_bsj_paths.end())
         {
-            struct OutwardKey
-            {
-                vector<int> left_vlist;
-                vector<int> right_vlist;
-                int32_t left_pos, left_rpos;
-                int32_t right_pos, right_rpos;
-            };
-
-            vector<pair<string, OutwardKey>> representatives;
             map<string, string> outward_rep_map; // qname -> representative qname
+
+            // Both loops below were previously O(qnames x bundle_outward_reads) and
+            // O(qnames x distinct_representatives) linear scans -- catastrophic for a
+            // bundle with many outward pairs (confirmed via live stack profiling: this
+            // function dominates runtime on liver's largest bundles). TOLERANCE_GAP is
+            // a fixed compile-time 0 (bridger.cc:38), so `abs(a-b) <= TOLERANCE_GAP` is
+            // exactly `a == b` -- the representative match is pure exact equality on
+            // (left_vlist, right_vlist, left_pos, left_rpos, right_pos, right_rpos),
+            // which an ordered-map lookup reproduces exactly, including "first qname
+            // seen for this exact key becomes the representative" (a map only records
+            // the first insertion, later lookups just find it -- same as the original
+            // scan always checking earlier representatives first).
+
+            // Pre-index each qname's (left_rd, right_rd) once, O(bundle_outward_reads),
+            // instead of re-scanning the whole read list for every qname.
+            map<string, pair<const read_info*, const read_info*>> qname_to_lr;
+            for (const read_info& r : bundle_outward_reads[bundle_idx])
+            {
+                pair<const read_info*, const read_info*>& lr = qname_to_lr[r.qname];
+                if (!lr.first || r.pos < lr.first->pos)
+                    lr.first = &r;
+                if (!lr.second || r.rpos > lr.second->rpos)
+                    lr.second = &r;
+            }
+
+            typedef tuple<vector<int>, vector<int>, int32_t, int32_t, int32_t, int32_t> OutwardExactKey;
+            map<OutwardExactKey, string> rep_lookup;
 
             for (const pair<const string, map<pair<int32_t,int32_t>, vector<vector<int>>>>& qname_entry : bundle_it_bg->second)
             {
                 const string& qname = qname_entry.first;
 
-                const read_info* left_rd  = nullptr;
-                const read_info* right_rd = nullptr;
-                for (const read_info& r : bundle_outward_reads[bundle_idx])
-                {
-                    if (r.qname != qname) continue;
-
-                    if (!left_rd || r.pos < left_rd->pos)
-						left_rd  = &r;
-
-                    if (!right_rd || r.rpos > right_rd->rpos)
-						right_rd = &r;
-                }
+                map<string, pair<const read_info*, const read_info*>>::const_iterator lr_it = qname_to_lr.find(qname);
+                const read_info* left_rd  = (lr_it != qname_to_lr.end()) ? lr_it->second.first  : nullptr;
+                const read_info* right_rd = (lr_it != qname_to_lr.end()) ? lr_it->second.second : nullptr;
 
                 if (!left_rd || !right_rd || left_rd == right_rd)
                 {
@@ -1672,43 +1728,42 @@ map<string, vector<vector<int>>> bridger::build_outward_bg(int bundle_idx, map<s
                     continue;
                 }
 
-                bool matched = false;
-                for (const pair<string, OutwardKey>& rep : representatives)
+                OutwardExactKey key(left_rd->vlist, right_rd->vlist, left_rd->pos, left_rd->rpos, right_rd->pos, right_rd->rpos);
+                map<OutwardExactKey, string>::iterator rep_it = rep_lookup.find(key);
+                if (rep_it != rep_lookup.end())
                 {
-                    const OutwardKey& key = rep.second;
-                    if (left_rd->vlist  == key.left_vlist && right_rd->vlist == key.right_vlist &&
-                        abs(left_rd->pos - key.left_pos) <= TOLERANCE_GAP &&
-                        abs(left_rd->rpos - key.left_rpos) <= TOLERANCE_GAP &&
-                        abs(right_rd->pos - key.right_pos) <= TOLERANCE_GAP &&
-                        abs(right_rd->rpos - key.right_rpos) <= TOLERANCE_GAP)
-                    {
-                        outward_rep_map[qname] = rep.first;
-                        matched = true;
-                        break;
-                    }
+                    outward_rep_map[qname] = rep_it->second;
                 }
-
-                if (!matched)
+                else
                 {
                     outward_rep_map[qname] = qname;
-                    OutwardKey key;
-                    key.left_vlist = left_rd->vlist;
-                    key.right_vlist = right_rd->vlist;
-                    key.left_pos = left_rd->pos;
-                    key.left_rpos = left_rd->rpos;
-                    key.right_pos = right_rd->pos;
-                    key.right_rpos = right_rd->rpos;
-                    representatives.push_back({qname, key});
+                    rep_lookup.emplace(key, qname);
                 }
             }
 
+            // Same rationale as build_chimeric_bg's analogous fix: outward_rep_map's
+            // grouping key (left/right vlist+pos+rpos) does NOT capture everything
+            // build_outward_read_paths' output can depend on -- specifically,
+            // find_softclip_confirmed_outward_bsj (bridger.cc ~2453) additionally
+            // reads each read's own soft-clip sequence content and NM, which two
+            // same-key qnames are not guaranteed to share (e.g. a sequencing error
+            // unique to one PCR-duplicate copy). So rather than assume identical
+            // members produce identical path lists, dedupe the accumulated
+            // multiset of paths per representative directly (order-preserving:
+            // first occurrence kept, exact repeats dropped) -- provably equivalent
+            // regardless of whether members' lists actually match, since every
+            // downstream reader of outward_bg only ever reacts to a path's first
+            // appearance in this same per-representative bag.
+            unordered_map<string, unordered_set<vector<int>, VectorIntHash>> seen_outward_paths_per_rep;
             for (const pair<const string, map<pair<int32_t,int32_t>, vector<vector<int>>>>& qname_entry : bundle_it_bg->second)
             {
                 const string& rep = outward_rep_map[qname_entry.first];
+                unordered_set<vector<int>, VectorIntHash>& seen = seen_outward_paths_per_rep[rep];
                 for (const pair<const pair<int32_t,int32_t>, vector<vector<int>>>& pos_entry : qname_entry.second)
 				{
                     for (const vector<int>& path : pos_entry.second)
-                        outward_bg[rep].push_back(path);
+                        if (seen.insert(path).second)
+                            outward_bg[rep].push_back(path);
                 }
                 rep_members[rep].push_back(qname_entry.first);
             }
@@ -2045,7 +2100,16 @@ static bool is_shifted_duplicate_bsj(bundle_bridge* bd, int s1, int e1, int s2, 
 	return seq_a == seq_b;
 }
 
-static int uf_find(map<int,int>& uf_parent, int x)
+// uf_parent used to be a std::map<int,int>, but its keys are always dense
+// path indices in [0, idx_to_path.size()) at every call site in this file
+// (see each call site's own comment) -- live profiling on liver's ALB-locus
+// bundle showed this union-find dominating (>98% of samples) once the
+// bg-copy bottleneck above was fixed, because every uf_parent[x] access paid
+// an O(log n) red-black-tree lookup instead of O(1) direct indexing, over a
+// huge number of calls. A plain vector, pre-sized to idx_to_path.size(), is
+// exactly equivalent (map<int,int>::operator[] and vector<int>::operator[]
+// both read/write the same int at key x) but O(1) per access.
+static int uf_find(vector<int>& uf_parent, int x)
 {
 	while (uf_parent[x] != x)
 	{
@@ -2641,7 +2705,7 @@ vector<CandidatePath> bridger::find_pareto_paths(int start, int end, int32_t len
 // pipeline instead. Pairs where a soft-clip on either mate already matches the reference at a
 // real splice junction on the opposite side are short-circuited directly to that single confirmed
 // boundary, bypassing the L/R search.
-void bridger::build_outward_read_paths(int bundle_idx, const std::string& outdir)
+void bridger::build_outward_read_paths(int bundle_idx, const std::string& outdir, const map<string, vector<read_info>>& grouped_outward)
 {
 	std::string filename = outdir + "/outward_possible_configs.txt";
 	std::ofstream fout(filename, std::ios_base::app);
@@ -2659,10 +2723,6 @@ void bridger::build_outward_read_paths(int bundle_idx, const std::string& outdir
 	fout << "---------------------------------\n";
 
 	const int32_t OUTWARD_SEGMENT_LEN_CAP = 2 * length_median;
-
-	map<string, vector<read_info>> grouped_outward;
-	for (const read_info& read : bundle_outward_reads[bundle_idx])
-		grouped_outward[read.qname].push_back(read);
 
 	// Per-bundle memoization of find_pareto_paths: many distinct outward pairs in a dense
 	// bundle resolve to identical (start,end) vertex endpoints (shared junctions/PCR-adjacent
@@ -2687,6 +2747,28 @@ void bridger::build_outward_read_paths(int bundle_idx, const std::string& outdir
 		rpos_to_v[bd->regions[i].rpos] = i;
 		lpos_to_v[bd->regions[i].lpos] = i;
 	}
+
+	// Cross-qname duplicate detection for the full (non-softclip) L x R x mid
+	// combinatorial branch below -- same exact-match key build_outward_bg
+	// (bridger.cc, its own OutwardExactKey) already uses to consolidate PCR/
+	// technical duplicates, but applied BEFORE materialization instead of
+	// after. L_candidates/R_candidates/mid_candidates/const_term (and hence
+	// every merged_path the combos loop below produces) are a pure function
+	// of exactly (left_read->vlist, right_read->vlist, left_read->pos/rpos,
+	// right_read->pos/rpos) plus bundle-invariant state (bd->junctions,
+	// splice_graph_adj, bd->regions) -- so two qnames sharing this key are
+	// guaranteed to produce byte-identical bundle_outward_bsj_paths content
+	// via this branch, and no two distinct (l,r,mid) triples within one
+	// qname's own enumeration can ever collide on the same merged_path either
+	// (the splice graph has no parallel edges -- see build_junction_graph's
+	// own assert -- so l.path/mid.path/r.path's disjoint vertex-id ranges make
+	// the final concatenation invertible back to a unique (l,r,mid) triple).
+	// On liver's real worst-case bundle (chr4 ALB locus), this cuts the
+	// number of materialized merged_path vectors from ~33.4M to ~7.7M -- a
+	// dominant driver of that bundle's memory blowup, confirmed via live
+	// profiling. See below for where this is populated/consulted.
+	typedef tuple<vector<int>, vector<int>, int32_t, int32_t, int32_t, int32_t> OutwardExactKey;
+	map<OutwardExactKey, string> full_branch_rep_of_key;
 
 	for (const std::pair<const string, vector<read_info>>& pr : grouped_outward)
 	{
@@ -2748,6 +2830,25 @@ void bridger::build_outward_read_paths(int bundle_idx, const std::string& outdir
 					<< ", R = " << bd->bb.chrm << ":" << sc_end << "]\n\n";
 			}
 
+			continue;
+		}
+
+		OutwardExactKey full_branch_key(left_read->vlist, right_read->vlist, left_read->pos, left_read->rpos, right_read->pos, right_read->rpos);
+		map<OutwardExactKey, string>::const_iterator dup_it = full_branch_rep_of_key.find(full_branch_key);
+		if (dup_it != full_branch_rep_of_key.end())
+		{
+			// Exact duplicate (by left/right vlist+pos+rpos) of an
+			// already-processed full-branch qname -- re-running the combos
+			// loop below would reproduce, value for value, what dup_it's
+			// qname already stored. Register this qname with an EMPTY path
+			// map (not a copy of the representative's, which would just move
+			// the memory cost rather than avoid it) so build_outward_bg's own
+			// OutwardExactKey grouping (unchanged) still attributes it to the
+			// same representative for read-support bookkeeping (rep_members),
+			// exactly as if it had gone through the full branch and produced
+			// the identical (now up-front known to be redundant) paths.
+			bundle_outward_bsj_paths[bundle_idx][pr.first];
+			fout << "\t[duplicate of " << dup_it->second << " -- identical (vlist,pos,rpos); L/R/mid enumeration skipped]\n\n";
 			continue;
 		}
 
@@ -2877,10 +2978,56 @@ void bridger::build_outward_read_paths(int bundle_idx, const std::string& outdir
 			}
 		}
 
+		// Gating on combos_accepted > 0 guarantees bundle_outward_bsj_paths[bundle_idx][pr.first]
+		// was actually populated by this qname (every combos_accepted++ above is immediately
+		// preceded by the matching push_back), so a future duplicate only ever fast-paths off a
+		// representative that genuinely has stored content -- baseline's "zero-accepted qnames get
+		// no map entry at all" behavior is preserved exactly.
+		if (combos_accepted > 0)
+			full_branch_rep_of_key[full_branch_key] = pr.first;
+
 		fout << "\tCombinations Accepted: " << combos_accepted << " / " << combos_total << "\n\n";
 	}
 
 	fout.close();
+}
+
+// The caller used to materialize a third map `bg` holding a full copy of
+// every path in both chim_bg and outward_bg, purely so this function could
+// iterate their union -- for a bundle as dense as liver's ALB locus, that
+// copy (confirmed via live profiling: 95.7% of this function's CPU time)
+// dwarfs everything else here. chim_bg/outward_bg/bg are all std::map with
+// the default comparator, so a sorted merge-join of chim_bg's and
+// outward_bg's own key sequences reproduces bg's exact key iteration order,
+// and for any key present in both, visiting chim_bg[key]'s paths then
+// outward_bg[key]'s (matching the original two-loop construction order --
+// the chim loop ran first) reproduces bg[key]'s exact content and order --
+// with zero copying, since this only ever reads through references into the
+// two maps the caller already has to keep intact regardless.
+static vector<string> bg_sorted_keys(const map<string, vector<vector<int>>>& chim_bg, const map<string, vector<vector<int>>>& outward_bg)
+{
+	vector<string> keys;
+	map<string, vector<vector<int>>>::const_iterator ci = chim_bg.begin(), oi = outward_bg.begin();
+	while (ci != chim_bg.end() && oi != outward_bg.end())
+	{
+		if (ci->first == oi->first) { keys.push_back(ci->first); ++ci; ++oi; }
+		else if (ci->first < oi->first) { keys.push_back(ci->first); ++ci; }
+		else { keys.push_back(oi->first); ++oi; }
+	}
+	for (; ci != chim_bg.end(); ++ci) keys.push_back(ci->first);
+	for (; oi != outward_bg.end(); ++oi) keys.push_back(oi->first);
+	return keys;
+}
+
+template <typename F>
+static void for_each_bg_path(const map<string, vector<vector<int>>>& chim_bg, const map<string, vector<vector<int>>>& outward_bg, const string& qname, F&& f)
+{
+	map<string, vector<vector<int>>>::const_iterator cit = chim_bg.find(qname);
+	if (cit != chim_bg.end())
+		for (const vector<int>& path : cit->second) f(path);
+	map<string, vector<vector<int>>>::const_iterator oit = outward_bg.find(qname);
+	if (oit != outward_bg.end())
+		for (const vector<int>& path : oit->second) f(path);
 }
 
 void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outdir, const map<string, vector<vector<int>>>& chim_bg, const map<string, vector<vector<int>>>& outward_bg, const map<string, vector<vector<int>>>& bg, const map<string, vector<string>>& chim_rep_members, const map<string, vector<string>>& outward_rep_members)
@@ -2892,11 +3039,17 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
     bgout << "Bundle " << bundle_idx << "\n";
     bgout << "=================================================\n\n";
 
-    if (bg.empty())
+    if (chim_bg.empty() && outward_bg.empty())
         bgout << "No Bipartite Graph\n\n\n";
 
 	else
 	{
+		// Reproduces the exact key set/order the old materialized `bg` map
+		// would have had (a std::map's own sorted-key iteration order),
+		// without ever copying the path vectors themselves -- see
+		// for_each_bg_path's comment above.
+		vector<string> bg_keys = bg_sorted_keys(chim_bg, outward_bg);
+
 		// Reverse the already-computed PCR-duplicate consolidation (build_chimeric_bg/
 		// build_outward_bg's SegKey grouping -- exact (pos, rpos, vlist) match per segment,
 		// i.e. same original fragment position AND splice-graph topology) into a per-qname
@@ -2936,16 +3089,16 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 
 		map<vector<int>, int> path_to_idx;
 		vector<vector<int>> idx_to_path;
-		for (const pair<const string, vector<vector<int>>>& qname_entry : bg)
+		for (const string& qname : bg_keys)
 		{
-			for (const vector<int>& path : qname_entry.second)
+			for_each_bg_path(chim_bg, outward_bg, qname, [&](const vector<int>& path)
 			{
 				if (path_to_idx.find(path) == path_to_idx.end())
 				{
 					path_to_idx[path] = idx_to_path.size();
 					idx_to_path.push_back(path);
 				}
-			}
+			});
 		}
 
 		// pre_gate_cc_size: dump-only diagnostic feature -- the size (number of
@@ -2965,19 +3118,19 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 		// gate itself.
 		vector<int> pre_gate_cc_size(idx_to_path.size(), 1);
 		{
-			map<int,int> pg_uf_parent;
+			vector<int> pg_uf_parent(idx_to_path.size());
 			for (int i = 0; i < (int)idx_to_path.size(); i++)
 				pg_uf_parent[i] = i;
 
-			for (const pair<const string, vector<vector<int>>>& qname_entry : bg)
+			for (const string& qname : bg_keys)
 			{
 				set<int> active_paths;
-				for (const vector<int>& path : qname_entry.second)
+				for_each_bg_path(chim_bg, outward_bg, qname, [&](const vector<int>& path)
 				{
 					map<vector<int>, int>::iterator it = path_to_idx.find(path);
 					if (it != path_to_idx.end())
 						active_paths.insert(it->second);
-				}
+				});
 				if (active_paths.size() <= 1) continue;
 
 				int first = uf_find(pg_uf_parent, *active_paths.begin());
@@ -3141,46 +3294,6 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 			}
 		}
 
-		map<int, vector<pair<string, bool>>> path_supporters;
-		for (const pair<const string, vector<vector<int>>>& qname_entry : bg)
-		{
-			const string& qname = qname_entry.first;
-
-			// A representative qname stands in for every original read that was
-			// consolidated into it (identical chimeric/outward config); expand back
-			// to the full membership so support counts, the evidence gate, and the
-			// final GTF cov/transcript_id reflect the true number of distinct reads
-			// instead of undercounting to just the surviving representative.
-			map<string, vector<string>>::const_iterator cmit = chim_rep_members.find(qname);
-			map<string, vector<string>>::const_iterator omit = outward_rep_members.find(qname);
-			const vector<string>* members =
-				(cmit != chim_rep_members.end()) ? &cmit->second :
-				(omit != outward_rep_members.end()) ? &omit->second : nullptr;
-
-			set<int> seen;
-			for (const vector<int>& q_path : qname_entry.second)
-			{
-				map<vector<int>, int>::iterator it = path_to_idx.find(q_path);
-				if (it == path_to_idx.end()) continue;
-
-				int idx = it->second;
-
-				if (!seen.insert(idx).second) continue;
-
-				bool is_chim_path = chim_path_indices.count(qname) && chim_path_indices.at(qname).count(idx);
-
-				if (members)
-				{
-					for (const string& member_qname : *members)
-						path_supporters[idx].push_back(make_pair(member_qname, is_chim_path));
-				}
-				else
-				{
-					path_supporters[idx].push_back(make_pair(qname, is_chim_path));
-				}
-			}
-		}
-
 		map<string, vector<read_info>> qname_segs;
 		for (const read_info& r : bundle_chimeric_reads[bundle_idx])
 			qname_segs[r.qname].push_back(r);
@@ -3206,147 +3319,258 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 				lr.second = &r;
 		}
 
-		vector<int> insert_sizes(idx_to_path.size(), -1);
-		for (int i = 0; i < idx_to_path.size(); i++)
+		// The bipartite-graph text dump below (near "Bipartite Graph (" ...)
+		// used to re-scan the full bundle_outward_reads[bundle_idx] vector once
+		// per representative qname printed, to find that qname's is_read1/
+		// is_read2-flagged reads specifically -- a different selection rule
+		// than qname_outward's min-pos/max-rpos pair above, so it can't reuse
+		// that index directly. Building the (is_read1, is_read2) index once
+		// here, O(bundle_outward_reads[bundle_idx].size()) total, and doing an
+		// O(1) lookup per representative in the dump loop instead, examines
+		// the exact same (qname, read) pairs under the exact same test --
+		// provably identical dump text, just without the O(representatives x
+		// raw_reads) redundant re-scan.
+		map<string, pair<const read_info*, const read_info*>> qname_to_r1r2;
+		for (const read_info& r : bundle_outward_reads[bundle_idx])
 		{
-			const vector<int>& p = idx_to_path[i];
-			if (p.empty()) continue;
+			pair<const read_info*, const read_info*>& r1r2 = qname_to_r1r2[r.qname];
+			if (r.is_read1) r1r2.first = &r;
+			else if (r.is_read2) r1r2.second = &r;
+		}
 
-			map<int, vector<pair<string, bool>>>::iterator supp_it = path_supporters.find(i);
-			if (supp_it == path_supporters.end()) continue;
+		// insert_val for one qname: identical logic to the original per-supporter
+		// computation, factored out so it can be invoked either once per
+		// representative (the common case) or once per extended-key subgroup
+		// (see below) without duplicating the branch logic itself.
+		auto compute_insert_val = [&](const string& lookup_qname, bool is_chim_path, const vector<int>& p, int full_len) -> int
+		{
+			int insert_val = -1;
 
-			int full_len = fragment_lengths[i];
-
-			int insert_sum = 0;
-			int insert_count = 0;
-
-			for (const pair<string, bool>& supporter : supp_it->second)
+			if (is_chim_path)
 			{
-				const string& qname = supporter.first;
-				const bool is_chim_path = supporter.second;
-				int insert_val = -1;
+				map<string, vector<read_info>>::iterator segs_it = qname_segs.find(lookup_qname);
+				if (segs_it == qname_segs.end() || segs_it->second.size() < 2) return -1;
 
-				if (is_chim_path)
+				const vector<read_info>& segs = segs_it->second;
+
+				bool any_vlist_empty = false;
+				for (const read_info& seg : segs)
 				{
-					map<string, vector<read_info>>::iterator segs_it = qname_segs.find(qname);
-					if (segs_it == qname_segs.end() || segs_it->second.size() < 2) continue;
-
-					const vector<read_info>& segs = segs_it->second;
-
-					bool any_vlist_empty = false;
-					for (const read_info& seg : segs)
+					if (seg.vlist.empty())
 					{
-						if (seg.vlist.empty())
-						{
-							any_vlist_empty = true;
-							break;
-						}
+						any_vlist_empty = true;
+						break;
 					}
+				}
 
-					if (any_vlist_empty) continue;
+				if (any_vlist_empty) return -1;
 
-					if (segs.size() == 2)
-						insert_val = (segs[0].rpos - segs[0].pos) + (segs[1].rpos - segs[1].pos);
+				if (segs.size() == 2)
+					insert_val = (segs[0].rpos - segs[0].pos) + (segs[1].rpos - segs[1].pos);
 
-					else if (segs.size() == 3)
-					{
-						const read_info& seg1 = segs[0];
-						const read_info& seg2 = segs[1];
-						const read_info& seg3 = segs[2];
+				else if (segs.size() == 3)
+				{
+					const read_info& seg1 = segs[0];
+					const read_info& seg2 = segs[1];
+					const read_info& seg3 = segs[2];
 
-						const read_info *S_ptr;
-						const read_info *T_first_ptr;
-						const read_info *T_second_ptr;
+					const read_info *S_ptr;
+					const read_info *T_first_ptr;
+					const read_info *T_second_ptr;
 
-						const read_info *start_ptr;
-						const read_info *mid_ptr;
-						const read_info *end_ptr;
+					const read_info *start_ptr;
+					const read_info *mid_ptr;
+					const read_info *end_ptr;
 
-						int c_frag_start;
-						int c_frag_end;
+					int c_frag_start;
+					int c_frag_end;
 
-						if (!identify_chimeric_traversal(seg1, seg2, seg3, S_ptr, T_first_ptr, T_second_ptr, start_ptr, mid_ptr, end_ptr, c_frag_start, c_frag_end)) continue;
+					if (!identify_chimeric_traversal(seg1, seg2, seg3, S_ptr, T_first_ptr, T_second_ptr, start_ptr, mid_ptr, end_ptr, c_frag_start, c_frag_end)) return -1;
 
-						int start_v = start_ptr->vlist.front();
-						int end_v = end_ptr->vlist.back();
+					int start_v = start_ptr->vlist.front();
+					int end_v = end_ptr->vlist.back();
 
-						if (start_v == end_v)
-							insert_val = std::abs(c_frag_end - c_frag_start);
-
-						else
-						{
-							vector<int> sub_path = extract_chimeric_subpath(p, start_v, end_v);
-							if (sub_path.empty()) continue;
-							insert_val = compute_chimeric_insert_size(sub_path, c_frag_start, c_frag_end, bd->regions);
-						}
-					}
+					if (start_v == end_v)
+						insert_val = std::abs(c_frag_end - c_frag_start);
 
 					else
 					{
-						int c_frag_start = segs.front().pos;
-						int c_frag_end = segs.back().rpos;
-
-						int start_v = segs.front().vlist.front();
-						int end_v = segs.back().vlist.back();
-
-						if (start_v == end_v)
-							insert_val = std::abs(c_frag_end - c_frag_start);
-						
-						else
-						{
-							vector<int> sub_path = extract_chimeric_subpath(p, start_v, end_v);
-							if (sub_path.empty()) continue;
-							insert_val = compute_chimeric_insert_size(sub_path, c_frag_start, c_frag_end, bd->regions);
-						}
+						vector<int> sub_path = extract_chimeric_subpath(p, start_v, end_v);
+						if (sub_path.empty()) return -1;
+						insert_val = compute_chimeric_insert_size(sub_path, c_frag_start, c_frag_end, bd->regions);
 					}
 				}
 
 				else
 				{
-					map<string, pair<const read_info*, const read_info*>>::iterator ow_it = qname_outward.find(qname);
-					if (ow_it == qname_outward.end()) continue;
+					int c_frag_start = segs.front().pos;
+					int c_frag_end = segs.back().rpos;
 
-					const read_info* left_rd = ow_it->second.first;
-					const read_info* right_rd = ow_it->second.second;
+					int start_v = segs.front().vlist.front();
+					int end_v = segs.back().vlist.back();
 
-					if (!left_rd || !right_rd || left_rd == right_rd) continue;
-					if (left_rd->vlist.empty() || right_rd->vlist.empty()) continue;
+					if (start_v == end_v)
+						insert_val = std::abs(c_frag_end - c_frag_start);
 
-					int middle = bridge_interior_len(bd, p, left_rd->vlist.back(), right_rd->vlist.front());
-					insert_val = full_len - middle;
-				}
-
-				if (insert_val >= 0 && insert_val <= 2 * length_median)
-				{
-					insert_sum += insert_val;
-					insert_count++;
+					else
+					{
+						vector<int> sub_path = extract_chimeric_subpath(p, start_v, end_v);
+						if (sub_path.empty()) return -1;
+						insert_val = compute_chimeric_insert_size(sub_path, c_frag_start, c_frag_end, bd->regions);
+					}
 				}
 			}
 
-			if (insert_count > 0)
-				insert_sizes[i] = static_cast<int>(insert_sum / insert_count);
+			else
+			{
+				map<string, pair<const read_info*, const read_info*>>::iterator ow_it = qname_outward.find(lookup_qname);
+				if (ow_it == qname_outward.end()) return -1;
+
+				const read_info* left_rd = ow_it->second.first;
+				const read_info* right_rd = ow_it->second.second;
+
+				if (!left_rd || !right_rd || left_rd == right_rd) return -1;
+				if (left_rd->vlist.empty() || right_rd->vlist.empty()) return -1;
+
+				int middle = bridge_interior_len(bd, p, left_rd->vlist.back(), right_rd->vlist.front());
+				insert_val = full_len - middle;
+			}
+
+			return insert_val;
+		};
+
+		// This used to be three separate passes: build a transient
+		// path_supporters map (one (member_qname, is_chim_path) pair pushed per
+		// member per distinct path a representative supports), then a pass
+		// computing insert_sizes by walking path_supporters, then a third pass
+		// copying path_supporters into path_chim_reads/path_outward_reads. For
+		// a representative with M raw PCR-duplicate members supporting K
+		// distinct paths, path_supporters alone held M*K live entries -- a
+		// second, entirely redundant M*K-sized structure coexisting alongside
+		// path_chim_reads/path_outward_reads (which need the real per-member
+		// membership regardless -- confirmed via their downstream is_subset/
+		// explained-tracking/count() consumers, so that part isn't removable).
+		//
+		// An earlier attempt to fold this into one pass (compute insert_val
+		// once per representative, weighted by member count) was reverted
+		// after a real rebuild+diff caught genuine divergences. Root cause:
+		// identify_chimeric_traversal (used only by the chimeric segs.size()==3
+		// case) reads each segment's is_read1/is_read2/is_reverse -- fields
+		// build_chimeric_bg's SegKey (pos/rpos/vlist only) does NOT capture, so
+		// two same-SegKey members COULD legitimately produce different
+		// start/end/frag_start/frag_end from that function despite being
+		// grouped as PCR duplicates. Every OTHER case was independently
+		// verified NOT to have this problem: segs.size()==2 and segs.size()>=4
+		// use only segs[].pos/.rpos/.vlist (SegKey fields); the outward branch
+		// uses only left_rd/right_rd's vlist/pos/rpos (exactly OutwardExactKey's
+		// fields). So those cases stay collapsed to once per (representative,
+		// idx) as originally attempted; ONLY the chimeric segs.size()==3 case
+		// is further subdivided by an extended key -- the representative's own
+		// SegKey (already required to match) PLUS each of its 3 segments'
+		// (is_read1, is_read2, is_reverse) -- so every subgroup shares every
+		// field identify_chimeric_traversal reads, making per-subgroup
+		// invariance provable the same way per-representative invariance
+		// already was for the other three cases.
+		typedef tuple<bool,bool,bool,bool,bool,bool,bool,bool,bool> ExtKey3;
+
+		vector<set<string>> path_chim_reads(idx_to_path.size());
+		vector<set<string>> path_outward_reads(idx_to_path.size());
+		vector<long long> insert_val_sum(idx_to_path.size(), 0);
+		vector<int> insert_val_count(idx_to_path.size(), 0);
+
+		for (const string& qname : bg_keys)
+		{
+			// A representative qname stands in for every original read that was
+			// consolidated into it (identical chimeric/outward config); expand back
+			// to the full membership so support counts, the evidence gate, and the
+			// final GTF cov/transcript_id reflect the true number of distinct reads
+			// instead of undercounting to just the surviving representative.
+			map<string, vector<string>>::const_iterator cmit = chim_rep_members.find(qname);
+			map<string, vector<string>>::const_iterator omit = outward_rep_members.find(qname);
+			const vector<string>* members =
+				(cmit != chim_rep_members.end()) ? &cmit->second :
+				(omit != outward_rep_members.end()) ? &omit->second : nullptr;
+			int n_members = members ? (int)members->size() : 1;
+
+			// Precompute (once per representative, not once per idx it
+			// supports) whether this representative's own chimeric segment
+			// list has exactly 3 segments -- the only case needing subdivision
+			// -- and if so, group *members by the extended key.
+			map<string, vector<read_info>>::const_iterator rep_segs_it = qname_segs.find(qname);
+			bool rep_is_3seg = (rep_segs_it != qname_segs.end() && rep_segs_it->second.size() == 3);
+
+			map<ExtKey3, vector<string>> subgroup_of;
+			if (rep_is_3seg && members && members->size() > 1)
+			{
+				for (const string& m : *members)
+				{
+					map<string, vector<read_info>>::const_iterator mit = qname_segs.find(m);
+					if (mit == qname_segs.end() || mit->second.size() != 3) continue;
+					const vector<read_info>& ms = mit->second;
+					ExtKey3 k(ms[0].is_read1, ms[0].is_read2, ms[0].is_reverse,
+					          ms[1].is_read1, ms[1].is_read2, ms[1].is_reverse,
+					          ms[2].is_read1, ms[2].is_read2, ms[2].is_reverse);
+					subgroup_of[k].push_back(m);
+				}
+			}
+
+			set<int> seen;
+			for_each_bg_path(chim_bg, outward_bg, qname, [&](const vector<int>& q_path)
+			{
+				map<vector<int>, int>::iterator it = path_to_idx.find(q_path);
+				if (it == path_to_idx.end()) return;
+
+				int idx = it->second;
+
+				if (!seen.insert(idx).second) return;
+
+				bool is_chim_path = chim_path_indices.count(qname) && chim_path_indices.at(qname).count(idx);
+
+				set<string>& dest = is_chim_path ? path_chim_reads[idx] : path_outward_reads[idx];
+				if (members)
+					dest.insert(members->begin(), members->end());
+				else
+					dest.insert(qname);
+
+				const vector<int>& p = idx_to_path[idx];
+				if (p.empty()) return;
+
+				int full_len = fragment_lengths[idx];
+
+				if (is_chim_path && rep_is_3seg && !subgroup_of.empty())
+				{
+					for (const pair<const ExtKey3, vector<string>>& sg : subgroup_of)
+					{
+						int insert_val = compute_insert_val(sg.second.front(), true, p, full_len);
+						if (insert_val >= 0 && insert_val <= 2 * length_median)
+						{
+							insert_val_sum[idx] += (long long)insert_val * (int)sg.second.size();
+							insert_val_count[idx] += (int)sg.second.size();
+						}
+					}
+				}
+				else
+				{
+					int insert_val = compute_insert_val(qname, is_chim_path, p, full_len);
+					if (insert_val >= 0 && insert_val <= 2 * length_median)
+					{
+						insert_val_sum[idx] += (long long)insert_val * n_members;
+						insert_val_count[idx] += n_members;
+					}
+				}
+			});
 		}
+
+		vector<int> insert_sizes(idx_to_path.size(), -1);
+		for (int i = 0; i < idx_to_path.size(); i++)
+			if (insert_val_count[i] > 0)
+				insert_sizes[i] = static_cast<int>(insert_val_sum[i] / insert_val_count[i]);
 
 		vector<int> kept_indices;
 		for (int i = 0; i < idx_to_path.size(); i++)
 		{
 			if (!idx_to_path[i].empty())
 				kept_indices.push_back(i);
-		}
-
-		vector<set<string>> path_chim_reads(idx_to_path.size());
-		vector<set<string>> path_outward_reads(idx_to_path.size());
-		for (const pair<const int, vector<pair<string, bool>>>& kv : path_supporters)
-		{
-			int idx = kv.first;
-			for (const pair<string, bool>& sup : kv.second)
-			{
-				if (sup.second)
-					path_chim_reads[idx].insert(sup.first);
-
-				else
-					path_outward_reads[idx].insert(sup.first);
-			}
 		}
 
 		vector<bool> pruned(idx_to_path.size(), false);
@@ -3521,7 +3745,7 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 			}
 		}
 
-		map<int,int> uf_parent;
+		vector<int> uf_parent(idx_to_path.size());
 		for (int i : kept_indices)
 			uf_parent[i] = i;
 
@@ -3532,22 +3756,100 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 		// could ever match -- identical merge result, ~O(n log n) instead of
 		// O(n^2). Confirmed via `sample`-based profiling that this loop's
 		// uf_find() calls (O(n^2) of them) dominated multi-hour hangs on liver.
-		vector<int> sorted_by_start = kept_indices;
-		sort(sorted_by_start.begin(), sorted_by_start.end(), [&](int x, int y) {
-			return circ_start[x] < circ_start[y];
-		});
-
-		for (int ai = 0; ai < (int)sorted_by_start.size(); ai++)
+		//
+		// Further perf fix: on liver's real ALB/AFP/AFM-cluster bundle, live
+		// profiling (macOS `sample`, after the dominance-pruning rewrite above
+		// removed the bigger cost) showed THIS loop next dominant -- because
+		// circ_start/circ_end can only take as many distinct values as the
+		// bundle has splice-graph region boundaries (here, ~1,213), while K
+		// (kept_indices.size()) can be in the millions, so the sliding window
+		// still has to physically scan enormous runs of candidates sharing (or
+		// nearly sharing) one circ_start value, even though is_shifted_duplicate_bsj
+		// itself returns instantly-false for any pair with IDENTICAL circ_start
+		// (shift == 0, checked first thing inside the function) -- an O(run^2)
+		// scan cost that survives even though each individual check is cheap.
+		//
+		// is_shifted_duplicate_bsj(bd,s1,e1,s2,e2) depends ONLY on the four
+		// boundary values, never on which candidate index owns them, and is
+		// symmetric under swapping the two pairs (verified algebraically: for
+		// shift>0 the function's own seq_a/seq_b are exactly seq_b'/seq_a' of
+		// the shift<0 branch reached by swapping the arguments, so the
+		// equality test is unaffected by argument order). So its result for
+		// any (a,b) is fully determined by their two (circ_start,circ_end)
+		// pairs and identical across every combination of members drawn from
+		// the same two boundary-value groups. It also never returns true
+		// within one group (identical circ_start forces shift==0), so members
+		// sharing one exact boundary pair are NEVER unioned with each other
+		// directly by this algorithm -- they only end up in the same final
+		// component if some OTHER, distinct boundary group bridges them, which
+		// is exactly what the two-level scheme below reproduces: level 1 runs
+		// the identical sliding-window algorithm over one representative per
+		// DISTINCT (circ_start,circ_end) pair (far fewer than K on real dense
+		// bundles); level 2 then propagates each level-1 merge down to every
+		// raw member of every boundary group that ended up in a level-1
+		// component of 2+ groups (a boundary group whose representative never
+		// matched anything stays untouched -- its raw members remain the
+		// individual singletons they already are, exactly matching what the
+		// original all-pairs algorithm would leave them as).
 		{
-			int a = sorted_by_start[ai];
-			for (int bi = ai + 1; bi < (int)sorted_by_start.size(); bi++)
-			{
-				int b = sorted_by_start[bi];
-				if (circ_start[b] - circ_start[a] > read_length) break;
-				if (uf_find(uf_parent, a) == uf_find(uf_parent, b)) continue;
+			typedef pair<int,int> BoundaryKey;
+			map<BoundaryKey, vector<int>> boundary_groups;
+			for (int i : kept_indices)
+				boundary_groups[make_pair(circ_start[i], circ_end[i])].push_back(i);
 
-				if (is_shifted_duplicate_bsj(bd, circ_start[a], circ_end[a], circ_start[b], circ_end[b]))
-					uf_parent[uf_find(uf_parent, b)] = uf_find(uf_parent, a);
+			vector<BoundaryKey> keys;
+			vector<vector<int>*> group_members;
+			keys.reserve(boundary_groups.size());
+			group_members.reserve(boundary_groups.size());
+			for (pair<const BoundaryKey, vector<int>>& kv : boundary_groups)
+			{
+				keys.push_back(kv.first);
+				group_members.push_back(&kv.second);
+			}
+
+			int m = (int)keys.size();
+			vector<int> grp_order(m);
+			for (int i = 0; i < m; i++) grp_order[i] = i;
+			sort(grp_order.begin(), grp_order.end(), [&](int x, int y) { return keys[x].first < keys[y].first; });
+
+			vector<int> grp_uf(m);
+			for (int i = 0; i < m; i++) grp_uf[i] = i;
+
+			for (int ai = 0; ai < m; ai++)
+			{
+				int gx = grp_order[ai];
+				for (int bi = ai + 1; bi < m; bi++)
+				{
+					int gy = grp_order[bi];
+					if (keys[gy].first - keys[gx].first > read_length) break;
+					if (uf_find(grp_uf, gx) == uf_find(grp_uf, gy)) continue;
+
+					if (is_shifted_duplicate_bsj(bd, keys[gx].first, keys[gx].second, keys[gy].first, keys[gy].second))
+						grp_uf[uf_find(grp_uf, gy)] = uf_find(grp_uf, gx);
+				}
+			}
+
+			map<int, vector<int>> groups_by_root;
+			for (int g = 0; g < m; g++)
+				groups_by_root[uf_find(grp_uf, g)].push_back(g);
+
+			for (const pair<const int, vector<int>>& kv : groups_by_root)
+			{
+				const vector<int>& gs = kv.second;
+				if (gs.size() < 2) continue; // this boundary group matched nothing -- its raw members stay as-is
+
+				int master = group_members[gs[0]]->front();
+				for (int g : gs)
+				{
+					for (int raw : *group_members[g])
+					{
+						if (raw == master) continue;
+						int ra = uf_find(uf_parent, raw);
+						int rm = uf_find(uf_parent, master);
+						if (ra != rm)
+							uf_parent[ra] = rm;
+					}
+				}
 			}
 		}
 
@@ -3575,38 +3877,186 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 		//   (1) chim_reads(a) ⊆ chim_reads(b) AND outward_reads(a) ⊆ outward_reads(b)
 		//   (2) min_edge_weight[a] < min_edge_weight[b]
 		//   (3) |insert_sizes[a] - length_median| > |insert_sizes[b] - length_median|
-		// Conditions checked cheapest-first (2, 3, then 1) to terminate early.
-		for (int ai = 0; ai < kept_indices.size(); ai++)
+		//
+		// The naive O(K^2) pairwise scan over kept_indices was live-profiled
+		// (macOS `sample`, on liver's real ALB/AFP/AFM-cluster bundle) to be the
+		// dominant cost of this whole function -- because build_outward_read_paths'
+		// per-qname L x R x mid enumeration can generate tens to hundreds of
+		// thousands of DISTINCT candidate paths from a single outward read pair,
+		// and every one of them gets pushed the IDENTICAL read-support signature
+		// (path_chim_reads[idx]/path_outward_reads[idx] -- that read pair's own
+		// PCR-duplicate member list, see the dest.insert(...) calls above), so
+		// condition (1) was a trivial identity (S subset-of S) for the
+		// overwhelming majority of the K^2 pairs this loop was checking -- yet was
+		// being recomputed explicitly, pairwise, via a full set walk every time.
+		//
+		// Rewritten: group kept_indices by their EXACT (path_chim_reads,
+		// path_outward_reads) signature -- G groups, each driven by a distinct
+		// underlying read-pair/PCR-group rather than by splice-path
+		// combinatorics, so G is orders of magnitude smaller than K on real dense
+		// bundles. Within one group every member shares an identical signature,
+		// so condition (1) is always true there and domination collapses to a
+		// pure 2D skyline problem on (min_edge_weight strictly greater,
+		// insert-size-distance strictly smaller), solved by sorting descending by
+		// weight and sweeping a running best-dist-so-far, processing equal-weight
+		// ties as one batch so ties never dominate each other (matching the
+		// original code's strict '<'/'>'). Across groups, condition (1) depends
+		// only on whether group Y's shared signature is a subset of group X's
+		// shared signature -- a single is_subset() check per GROUP pair (not per
+		// member pair), using each group's own representative member (any one,
+		// since all share the identical signature). A member of group Y
+		// surviving its own intra-group pruning can only be cross-group-dominated
+		// by a member of group X's own Pareto frontier: if some non-frontier
+		// member of X dominated it, X's frontier (being non-dominated within X)
+		// must contain a member with weight/dist at least as good that dominates
+		// it too, by transitivity of the domination relation -- so only
+		// frontier-vs-frontier work is needed, never full group-vs-group.
 		{
-			int a = kept_indices[ai];
-			if (pruned[a]) continue;
-
-			for (int bi = 0; bi < kept_indices.size(); bi++)
+			typedef long long SigHash;
+			auto sig_hash = [](const set<string>& s1, const set<string>& s2) -> SigHash
 			{
-				if (ai == bi) continue;
+				SigHash h = (SigHash)s1.size() * 1000003LL + (SigHash)s2.size();
+				for (const string& x : s1) h = h * 1000003LL + (SigHash)std::hash<string>()(x);
+				for (const string& x : s2) h = h * 1000003LL + (SigHash)std::hash<string>()(x);
+				return h;
+			};
 
-				int b = kept_indices[bi];
+			// Hash-bucket first (cheap, O(signature size) per item), then
+			// partition each bucket by EXACT equality (handles the vanishingly
+			// rare case of a hash collision between two genuinely different
+			// signatures) -- this never merges two distinct signatures into one
+			// group; a collision can only ever (harmlessly) split one signature
+			// across more than one bucket-local group, which nothing below
+			// depends on avoiding.
+			unordered_map<SigHash, vector<vector<int>>> hash_buckets;
+			for (int i : kept_indices)
+			{
+				SigHash h = sig_hash(path_chim_reads[i], path_outward_reads[i]);
+				vector<vector<int>>& bucket = hash_buckets[h];
+				bool placed = false;
+				for (vector<int>& grp : bucket)
+				{
+					int rep = grp[0];
+					if (path_chim_reads[rep] == path_chim_reads[i] && path_outward_reads[rep] == path_outward_reads[i])
+					{
+						grp.push_back(i);
+						placed = true;
+						break;
+					}
+				}
+				if (!placed) bucket.push_back(vector<int>(1, i));
+			}
 
-				// Condition 2: both edge weights valid, a's strictly lower
-				if (min_edge_weight[a] < 0 || min_edge_weight[b] < 0) continue;
+			vector<vector<int>> groups;
+			for (pair<const SigHash, vector<vector<int>>>& kv : hash_buckets)
+				for (vector<int>& grp : kv.second)
+					groups.push_back(std::move(grp));
 
-				if (min_edge_weight[a] >= min_edge_weight[b]) continue;
+			int G = (int)groups.size();
 
-				// Condition 3: a's insert size farther from median than b's
-				if (insert_sizes[a] < 0 || insert_sizes[b] < 0) continue;
+			struct FrontierPt { int w; int d; int idx; };
+			vector<vector<FrontierPt>> group_frontier(G); // sorted ascending by w
+			vector<vector<int>> group_suffix_min(G);       // suffix_min[k] = min d over frontier[k..end]
 
-				int dist_a = abs(insert_sizes[a] - (int)length_median);
-				int dist_b = abs(insert_sizes[b] - (int)length_median);
+			for (int gi = 0; gi < G; gi++)
+			{
+				vector<int>& members = groups[gi];
+				vector<int> valid;
+				for (int i : members)
+					if (min_edge_weight[i] >= 0 && insert_sizes[i] >= 0)
+						valid.push_back(i);
+				// Members with an invalid edge weight or insert size can never
+				// satisfy conditions (2)/(3) as either the dominated or the
+				// dominator (see the original code's own skip on invalid values
+				// on either side) -- they stay exactly as pruned[] already has
+				// them, and never participate below.
+				if (valid.empty()) continue;
 
-				if (dist_a <= dist_b) continue;
+				sort(valid.begin(), valid.end(), [&](int x, int y) { return min_edge_weight[x] < min_edge_weight[y]; });
 
-				// Condition 1: a's read sets are subsets of b's
-				if (! is_subset(path_chim_reads[a], path_chim_reads[b])) continue;
+				int n = (int)valid.size();
+				vector<int> dist(n);
+				for (int k = 0; k < n; k++)
+					dist[k] = abs(insert_sizes[valid[k]] - (int)length_median);
 
-				if (! is_subset(path_outward_reads[a], path_outward_reads[b])) continue;
+				vector<bool> is_frontier(n, true);
+				int best_dist_so_far = INT_MAX;
+				int k = n - 1;
+				while (k >= 0)
+				{
+					int batch_start = k;
+					while (batch_start >= 0 && min_edge_weight[valid[batch_start]] == min_edge_weight[valid[k]])
+						batch_start--;
+					// members at positions (batch_start, k] all share this batch's weight value
+					int batch_min_dist = INT_MAX;
+					for (int m = batch_start + 1; m <= k; m++)
+					{
+						if (dist[m] > best_dist_so_far)
+							is_frontier[m] = false;
+						batch_min_dist = min(batch_min_dist, dist[m]);
+					}
+					best_dist_so_far = min(best_dist_so_far, batch_min_dist);
+					k = batch_start;
+				}
 
-				pruned[a] = true;
-				break;
+				for (int m = 0; m < n; m++)
+				{
+					if (!is_frontier[m])
+						pruned[valid[m]] = true;
+					else
+						group_frontier[gi].push_back({min_edge_weight[valid[m]], dist[m], valid[m]});
+				}
+
+				sort(group_frontier[gi].begin(), group_frontier[gi].end(), [](const FrontierPt& x, const FrontierPt& y) { return x.w < y.w; });
+
+				group_suffix_min[gi].resize(group_frontier[gi].size());
+				int run = INT_MAX;
+				for (int t = (int)group_frontier[gi].size() - 1; t >= 0; t--)
+				{
+					run = min(run, group_frontier[gi][t].d);
+					group_suffix_min[gi][t] = run;
+				}
+			}
+
+			for (int gy = 0; gy < G; gy++)
+			{
+				if (group_frontier[gy].empty()) continue;
+
+				int rep_y = groups[gy][0];
+
+				for (int gx = 0; gx < G; gx++)
+				{
+					if (gx == gy || group_frontier[gx].empty()) continue;
+
+					int rep_x = groups[gx][0];
+
+					// Cheap size pre-filter before the full is_subset scan: a
+					// subset can never have more elements than its superset.
+					if (path_chim_reads[rep_y].size() > path_chim_reads[rep_x].size()) continue;
+					if (path_outward_reads[rep_y].size() > path_outward_reads[rep_x].size()) continue;
+
+					if (! is_subset(path_chim_reads[rep_y], path_chim_reads[rep_x])) continue;
+					if (! is_subset(path_outward_reads[rep_y], path_outward_reads[rep_x])) continue;
+
+					const vector<FrontierPt>& fr = group_frontier[gx];
+					const vector<int>& sm = group_suffix_min[gx];
+
+					for (const FrontierPt& fp : group_frontier[gy])
+					{
+						if (pruned[fp.idx]) continue;
+
+						// Does group gx's frontier contain a member with
+						// strictly greater weight and strictly smaller dist?
+						int lo = 0, hi = (int)fr.size();
+						while (lo < hi)
+						{
+							int mid = (lo + hi) / 2;
+							if (fr[mid].w > fp.w) hi = mid; else lo = mid + 1;
+						}
+						if (lo < (int)fr.size() && sm[lo] < fp.d)
+							pruned[fp.idx] = true;
+					}
+				}
 			}
 		}
 
@@ -3677,21 +4127,25 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 
 			for (const pair<const pair<int, int>, vector<int>>& grp : bsjgrp_members)
 			{
+				// Ascending sort + upper_bound (same binary-search pattern
+				// pool_support_rank already uses just below) instead of a
+				// linear scan per group member: rank = 1 + (count of values
+				// strictly greater than mine). With sorted_support ascending,
+				// that count is size() - (# of values <= mine), and
+				// upper_bound(mine) - begin() is exactly that <= count --
+				// identical result to the original descending-scan-with-break,
+				// just O(log n) instead of O(n) per member.
 				vector<int> sorted_support;
 				sorted_support.reserve(grp.second.size());
 				for (int i : grp.second)
 					sorted_support.push_back((int)(path_chim_reads[i].size() + path_outward_reads[i].size()));
-				sort(sorted_support.rbegin(), sorted_support.rend());
+				sort(sorted_support.begin(), sorted_support.end());
 
 				for (int i : grp.second)
 				{
 					int mine = (int)(path_chim_reads[i].size() + path_outward_reads[i].size());
-					int rank = 1;
-					for (int s : sorted_support)
-					{
-						if (s > mine) rank++;
-						else break;
-					}
+					long n_le = upper_bound(sorted_support.begin(), sorted_support.end(), mine) - sorted_support.begin();
+					int rank = (int)(sorted_support.size() - n_le) + 1;
 					pool_bsjgrp_sup_rank[i] = (double)rank;
 					pool_bsjgrp_is_top[i] = (rank == 1) ? 1.0 : 0.0;
 				}
@@ -3920,20 +4374,25 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 		bgout << "\n";
 
 		map<string, set<int>> qname_to_active_paths;
-		for (const pair<const string, vector<vector<int>>>& qname_entry : bg)
+		for (const string& qname : bg_keys)
 		{
-			const string& qname = qname_entry.first;
-			for (const vector<int>& path : qname_entry.second)
+			for_each_bg_path(chim_bg, outward_bg, qname, [&](const vector<int>& path)
 			{
 				map<vector<int>, int>::iterator pit = path_to_idx.find(path);
-				if (pit == path_to_idx.end()) continue;
+				if (pit == path_to_idx.end()) return;
 				int idx = pit->second;
-				if (!old_to_new.count(idx)) continue;
+				if (!old_to_new.count(idx)) return;
 				qname_to_active_paths[qname].insert(idx);
-			}
+			});
 		}
 
-		uf_parent.clear();
+		// uf_parent is being reused for a second, independent union-find pass
+		// here. A vector doesn't need an explicit reset the way the map it
+		// used to be did: every position this pass will ever read is one of
+		// `kept_indices` (guarded via old_to_new, whose domain is exactly
+		// this same kept_indices set), and the loop below freshly overwrites
+		// every one of those positions before any uf_find call touches it --
+		// stale values left over at OTHER positions are simply never read.
 		for (int i : kept_indices)
 			uf_parent[i] = i;
 
@@ -4017,19 +4476,14 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 
 				if (is_chimeric)
 				{
-					vector<read_info> chim_segs;
-					for (const read_info& read : bundle_chimeric_reads[bundle_idx])
-					{
-						if (read.qname == qname)
-							chim_segs.push_back(read);
-					}
-
-					sort(
-						chim_segs.begin(), chim_segs.end(), [](const read_info& a, const read_info& b)
-						{
-							return a.pos < b.pos;
-						}
-					);
+					// qname_segs (built earlier in this function, same source
+					// bundle_chimeric_reads[bundle_idx], same per-qname partition,
+					// same pos-sort) already holds exactly this data -- reuse it
+					// instead of re-scanning the full raw-read vector once per
+					// representative printed here.
+					static const vector<read_info> empty_chim_segs;
+					map<string, vector<read_info>>::const_iterator csit = qname_segs.find(qname);
+					const vector<read_info>& chim_segs = (csit != qname_segs.end()) ? csit->second : empty_chim_segs;
 
 					for (const read_info& seg : chim_segs)
 					{
@@ -4062,18 +4516,19 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 
 				else
 				{
+					// qname_to_r1r2 (built earlier alongside qname_outward, same
+					// source bundle_outward_reads[bundle_idx]) gives O(1) access to
+					// this qname's is_read1/is_read2-flagged reads directly, instead
+					// of re-scanning the full raw-read vector once per representative.
 					string r1_str, r2_str;
-					for (const read_info& read : bundle_outward_reads[bundle_idx])
+					map<string, pair<const read_info*, const read_info*>>::const_iterator r1r2_it = qname_to_r1r2.find(qname);
+					if (r1r2_it != qname_to_r1r2.end())
 					{
-						if (read.qname != qname) continue;
+						if (r1r2_it->second.first)
+							r1_str = "R1 " + bd->bb.chrm + ":" + to_string(r1r2_it->second.first->pos) + "-" + to_string(r1r2_it->second.first->rpos);
 
-						string loc = bd->bb.chrm + ":" + to_string(read.pos) + "-" + to_string(read.rpos);
-						
-						if (read.is_read1)
-							r1_str = "R1 " + loc;
-
-						else if (read.is_read2)
-							r2_str = "R2 " + loc;
+						if (r1r2_it->second.second)
+							r2_str = "R2 " + bd->bb.chrm + ":" + to_string(r1r2_it->second.second->pos) + "-" + to_string(r1r2_it->second.second->rpos);
 					}
 
 					if (!r1_str.empty())
@@ -4489,13 +4944,25 @@ void bridger::write_bipartite_graph_file(int bundle_idx, const std::string& outd
 				bool fails_anchor_gate = false;
 				if (!path_chim_reads[best_path].empty())
 				{
+					// Was a full scan of bundle_chimeric_reads[bundle_idx] (size N,
+					// up to 11M+ on liver's ALB locus) per accepted candidate this
+					// bundle, to find the much smaller subset whose qname is in
+					// path_chim_reads[best_path]. qname_segs (built once earlier in
+					// this function from the same source) gives O(1) access to
+					// exactly that qname's own reads -- same (qname, read) pairs
+					// examined, same test, just via a cheaper traversal order.
 					bool left_anchored = false;
 					bool right_anchored = false;
-					for (const read_info& r : bundle_chimeric_reads[bundle_idx])
+					for (const string& qn : path_chim_reads[best_path])
 					{
-						if (!path_chim_reads[best_path].count(r.qname)) continue;
-						if (r.pos == circ_start) left_anchored = true;
-						if (r.rpos == circ_end) right_anchored = true;
+						map<string, vector<read_info>>::const_iterator segs_it = qname_segs.find(qn);
+						if (segs_it == qname_segs.end()) continue;
+						for (const read_info& r : segs_it->second)
+						{
+							if (r.pos == circ_start) left_anchored = true;
+							if (r.rpos == circ_end) right_anchored = true;
+							if (left_anchored && right_anchored) break;
+						}
 						if (left_anchored && right_anchored) break;
 					}
 					fails_anchor_gate = !(left_anchored && right_anchored);
@@ -5419,10 +5886,31 @@ int bridger::print_splice_graph()
 		dir_created = true;
 	}
 
-	write_chimeric_read_paths(current_bundle_index, outdir);
-	write_simplified_chimeric_paths(current_bundle_index, outdir);
-	write_chimeric_insert_sizes(current_bundle_index, outdir);
-	build_outward_read_paths(current_bundle_index, outdir);
+	// Built once here and passed by const-reference into every dump function below that
+	// needs "this bundle's chimeric/outward reads grouped by qname" -- write_chimeric_read_paths,
+	// write_chimeric_insert_sizes and build_outward_read_paths each used to independently
+	// re-copy every read_info in bundle_chimeric_reads[current_bundle_index]/bundle_outward_reads
+	// [current_bundle_index] into their own freshly-built map (same grouping, rebuilt from
+	// scratch 2-3 times per bundle), and write_simplified_chimeric_paths re-scanned the entire
+	// bundle_chimeric_reads[current_bundle_index] vector once per qname (O(N) per qname, O(N*M)
+	// total) to get the same information. On a dense bundle (thousands to millions of reads,
+	// e.g. liver's ALB locus) this meant the same read_info data was copied/scanned multiple
+	// times per bundle, driving allocator churn/fragmentation for no behavioral benefit -- a
+	// std::map's iteration order is fully determined by its keys, so building this grouping once
+	// and sharing it produces byte-identical per-qname vectors, in the same order, as every one
+	// of these functions built independently before.
+	map<string, vector<read_info>> grouped_chimeric;
+	for (const read_info& read : bundle_chimeric_reads[current_bundle_index])
+		grouped_chimeric[read.qname].push_back(read);
+
+	map<string, vector<read_info>> grouped_outward;
+	for (const read_info& read : bundle_outward_reads[current_bundle_index])
+		grouped_outward[read.qname].push_back(read);
+
+	write_chimeric_read_paths(current_bundle_index, outdir, grouped_chimeric);
+	write_simplified_chimeric_paths(current_bundle_index, outdir, grouped_chimeric);
+	write_chimeric_insert_sizes(current_bundle_index, outdir, grouped_chimeric);
+	build_outward_read_paths(current_bundle_index, outdir, grouped_outward);
 	// DISABLED (Round 15/21 perf fix): this diagnostic dump
 	// (simplify_outward_full_sequence_paths.txt) is unbounded and reached
 	// 29.4GB on liver (vs 36MB on kidney), confirmed unused by any evaluate/
@@ -5434,14 +5922,18 @@ int bridger::print_splice_graph()
 	map<string, vector<vector<int>>> chim_bg = build_chimeric_bg(current_bundle_index, chim_rep_members);
 	map<string, vector<vector<int>>> outward_bg = build_outward_bg(current_bundle_index, outward_rep_members);
 
-	map<string, vector<vector<int>>> bg;
-	for (const pair<const string, vector<vector<int>>>& e : chim_bg)
-		bg[e.first].insert(bg[e.first].end(), e.second.begin(), e.second.end());
-
-	for (const pair<const string, vector<vector<int>>>& e : outward_bg)
-		bg[e.first].insert(bg[e.first].end(), e.second.begin(), e.second.end());
-
-	write_bipartite_graph_file(current_bundle_index, outdir, chim_bg, outward_bg, bg, chim_rep_members, outward_rep_members);
+	// The third `bg` map used to be a full physical copy of every path in
+	// chim_bg and outward_bg combined, built here just so
+	// write_bipartite_graph_file could iterate their union -- for a bundle
+	// as dense as liver's ALB locus, live profiling showed this single copy
+	// consuming 95.7% of this function's CPU time. write_bipartite_graph_file
+	// now reconstructs the same content/order it needs directly from
+	// chim_bg/outward_bg (see for_each_bg_path/bg_sorted_keys above it), so
+	// the `bg` parameter itself is no longer used for anything but its
+	// emptiness check -- pass an empty placeholder rather than change the
+	// function's signature.
+	map<string, vector<vector<int>>> bg_unused;
+	write_bipartite_graph_file(current_bundle_index, outdir, chim_bg, outward_bg, bg_unused, chim_rep_members, outward_rep_members);
 
 	// This bundle's candidate generation, selection, and emission are now
 	// complete -- every read of these seven bundle_idx-keyed maps happens
@@ -5510,7 +6002,7 @@ int bridger::build_path_nodes(int low, int high, vector<fragment> &frags)
 int bridger::build_path_nodes(int max_len, vector<fragment> &frags)
 {
 	max_pnode_length = max_len;
-	map<vector<int>, int> m;
+	unordered_map<vector<int>, int, VectorIntHash> m;
 	set<int> hs;
 	for(int i = 0; i < frags.size(); i++)
 	{
@@ -5535,18 +6027,53 @@ int bridger::build_path_nodes(int max_len, vector<fragment> &frags)
 		*/
 	}
 
+	// The loop below used to decode + window EVERY raw hit individually --
+	// up to ~11.1M iterations for liver's ALB-locus bundle, each a heap
+	// allocation plus a tree-walk map insert. Real BAM data at that locus
+	// shows massive duplication: ~11.1M raw hits collapse to ~199K distinct
+	// (encoded) vlist signatures, some repeated 200K+ times. encode_vlist/
+	// decode_vlist (hit.cc) is a genuine bijection, so grouping by the raw
+	// encoded h.vlist is exactly equivalent to grouping by the decoded
+	// vertex list, and needs no decode to do the grouping itself.
+	//
+	// The shared per-vlist helper above (build_path_nodes(map&,v,cnt)) always
+	// forces cnt=1 internally regardless of what's passed (see its own first
+	// line) -- so it can't be reused here with a "cnt=group size" call, that
+	// would silently undercount. Instead this windows each DISTINCT vlist
+	// exactly once, adding the group's hit count to every window position
+	// extracted from it -- for a group of G identical hits, this adds
+	// exactly the same total to each window as the original G separate
+	// per-hit calls would have (each contributing +1 per occurrence of that
+	// window within the vlist, G times over == +G), just computed once
+	// instead of G times.
+	unordered_map<vector<int>, int, VectorIntHash> vlist_counts;
 	for(int i = 0; i < bd->bb.hits.size(); i++)
 	{
-		// TODO, also check length
 		hit &h = bd->bb.hits[i];
 		if(hs.find(h.hid) != hs.end()) continue;
-		vector<int> v1 = decode_vlist(h.vlist);
-		build_path_nodes(m, v1, 1);
+		vlist_counts[h.vlist]++;
+	}
+
+	for(unordered_map<vector<int>, int, VectorIntHash>::iterator git = vlist_counts.begin(); git != vlist_counts.end(); git++)
+	{
+		vector<int> v1 = decode_vlist(git->first);
+		int group_cnt = git->second;
+		if(v1.size() <= 0) continue;
+		int n = (int)v1.size();
+		if(n > max_pnode_length) n = max_pnode_length;
+		for(int i = 0; i <= (int)v1.size() - n; i++)
+		{
+			int j = i + n;
+			vector<int> s(v1.begin() + i, v1.begin() + j);
+			unordered_map<vector<int>, int, VectorIntHash>::iterator it = m.find(s);
+			if(it == m.end()) m.insert(make_pair(s, group_cnt));
+			else it->second += group_cnt;
+		}
 	}
 
 
 	pnodes.clear();
-	for(map<vector<int>, int>::iterator it = m.begin(); it != m.end(); it++)
+	for(unordered_map<vector<int>, int, VectorIntHash>::iterator it = m.begin(); it != m.end(); it++)
 	{
 		path p;
 		p.v = it->first;
@@ -5555,7 +6082,7 @@ int bridger::build_path_nodes(int max_len, vector<fragment> &frags)
 		pnodes.push_back(p);
 		//adjust_path_score(p);
 	}
-	
+
 	return 0;
 }
 
@@ -5574,7 +6101,7 @@ int bridger::adjust_path_score(path &p)
 	return 0;
 }
 
-int bridger::build_path_nodes(map<vector<int>, int> &m, const vector<int> &v, int cnt)
+int bridger::build_path_nodes(unordered_map<vector<int>, int, VectorIntHash> &m, const vector<int> &v, int cnt)
 {
 	cnt = 1;
 	if(v.size() <= 0) return 0;
@@ -6115,9 +6642,19 @@ int bridger::dynamic_programming(int k1, int k2, vector< vector<entry> > &table)
 	assert(k1 >= 0 && k1 < n);
 	assert(k2 >= 0 && k2 < n);
 
-	table.clear();
-	table.resize(n);
-
+	// table.clear()+resize(n) here was O(n) wasted work on EVERY call -- this
+	// function is called once per distinct affected start vertex from a loop
+	// (bridger.cc's two bridge_hard_fragments_* callers, and the single-shot
+	// caller in bridge_clip), each of which already does table.resize(n) once
+	// before entering that loop, so table always already has size n by the
+	// time this runs. Every table[j] read here is only for j in [k1,k], and
+	// [k1,k) is always freshly overwritten earlier within this SAME call
+	// (table[k1] explicitly below, table[k] for k1<k<=k2 via table[k]=v at
+	// the end of the loop body) -- jsety[k]'s stored predecessors j always
+	// satisfy j < k (built from sorted pnodes, bridger.cc:433-457), so no
+	// read here can ever see stale data from a previous call. Only table[k1]
+	// itself needs an explicit reset, since a prior call may have grown it
+	// beyond size 1.
 	table[k1].resize(1);
 	table[k1][0].stack.assign(dp_stack_size, 999999);
 	table[k1][0].length = bd->regions[k1].rpos - bd->regions[k1].lpos;
