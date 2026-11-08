@@ -1,11 +1,11 @@
 # Install TERRACE from Source
 
-Download the source code of latest TERRACE from [here](https://github.com/Shao-Group/TERRACE/releases/download/v1.1.2/terrace-1.1.2.tar.gz). TERRACE uses additional libraries of Boost and htslib. 
+Download the source code of latest TERRACE 2.0 from [here](https://github.com/Shao-Group/TERRACE/archive/refs/heads/outward.zip). TERRACE 2.0 uses additional libraries of Boost and htslib. 
 If they have not been installed in your system, you first
 need to download and install them. You might also need to
 export the runtime library path to certain environmental
 variable (for example, `LD_LIBRARY_PATH`, for most linux distributions).
-After install these dependencies, you then compile the source code of TERRACE.
+After install these dependencies, you then compile the source code of TERRACE 2.0.
 If some of the above dependencies are not installed to the default system 
 directories (for example, `/usr/local`, for most linux distributions),
 their corresponding installing paths should be specified to `configure` of TERRACE.
@@ -47,7 +47,7 @@ is an additional `lib` following the installation path):
 export LD_LIBRARY_PATH=/path/to/your/htslib/lib:$LD_LIBRARY_PATH
 ```
 
-## Build TERRACE
+## Build TERRACE 2.0
 
 Use the following to compile TERRACE:
 ```
